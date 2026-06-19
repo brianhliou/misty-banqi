@@ -3,6 +3,13 @@
 All notable changes to MistyBanqi. Strength figures are relative gains measured via
 large-scale paired-deal bakeoffs (see the README).
 
+## [0.2.2]
+
+- **Anti-draw-sac root guard** (`no_draw_sac`, Feat bit 512): at the root, a marginal move
+  (eval < +0.3) that makes an obviously losing capture (crude SEE) is clamped below the draw
+  value, so the engine never sheds material into a position it can't convert and then takes
+  the draw anyway. Measured in ~385-game paired bakeoffs: no regression, losses 33→19.
+
 ## [0.2.1]
 
 - **General-safety eval term** (`gen_danger`, Feat bit 256): a proximity- and escape-aware

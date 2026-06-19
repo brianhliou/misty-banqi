@@ -676,6 +676,13 @@ struct Feat {
                      // mechanics, so no opponent-specificity; targets the endgame lattice
                      // collapse where static value is most wrong. Subsumes king_ctx — test it
                      // WITHOUT king_ctx to avoid double-counting the general.
+    no_draw_sac: bool, // bit 9: don't sacrifice material to dodge a draw. At the ROOT, a
+                       // marginal losing capture (crude SEE < 0 and not clearly winning) is
+                       // never preferred over an available draw — capped just below the draw
+                       // value. Fixes the "shed a piece, then draw anyway" symptom of the
+                       // conversion pathology (up material it can't convert + chase moves are
+                       // repetition draws → it grabs a losing capture a hair above the draw).
+                       // Root-only: doesn't distort deep search.
 }
 
 impl Feat {
@@ -690,6 +697,7 @@ impl Feat {
             vmob: b & 64 != 0,
             dom_val: b & 128 != 0,
             gen_danger: b & 256 != 0,
+            no_draw_sac: b & 512 != 0,
         }
     }
     fn none() -> Feat {
@@ -703,6 +711,7 @@ impl Feat {
             vmob: false,
             dom_val: false,
             gen_danger: false,
+            no_draw_sac: false,
         }
     }
 }
@@ -1060,6 +1069,43 @@ fn negamax(st: &State, depth: i32, mut alpha: f64, beta: f64, cfg: &Cfg, ctx: &m
     Ok(best)
 }
 
+/// Crude static-exchange check (Feat::no_draw_sac): is `m` an obviously LOSING capture — the
+/// attacker is worth more than the victim AND the destination is defended by an enemy piece
+/// that can recapture the (now-placed) attacker? Conservative: it ignores cannon-screen
+/// recaptures and deeper exchange chains, so it only flags clear "captured low with a high
+/// piece into a defended square" cases. Used only at the root to stop the engine shedding
+/// material to dodge a draw.
+fn losing_capture(st: &State, m: (u8, u8), values: &[f64; 7]) -> bool {
+    if m.0 == m.1 {
+        return false; // a flip, not a capture
+    }
+    let victim = st.sq[m.1 as usize];
+    let attacker = st.sq[m.0 as usize];
+    if !is_piece(victim) || !is_piece(attacker) {
+        return false; // quiet move, not a capture
+    }
+    if values[code_role(attacker)] <= values[code_role(victim)] {
+        return false; // equal-or-up capture is not a losing exchange
+    }
+    let opp = 1 - code_color(attacker);
+    let (df, dr) = coord(m.1 as usize);
+    for (ddf, ddr) in ORTHO {
+        let (f, r) = (df + ddf, dr + ddr);
+        if !in_bounds(f, r) {
+            continue;
+        }
+        let s = sqi(f, r);
+        if s == m.0 as usize {
+            continue; // the attacker's vacated origin
+        }
+        let d = st.sq[s];
+        if is_piece(d) && code_color(d) == opp && can_capture(code_role(d), code_role(attacker)) {
+            return true; // an enemy neighbour can recapture the attacker → losing exchange
+        }
+    }
+    false
+}
+
 fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<(u8, u8)>, ()> {
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
@@ -1076,8 +1122,17 @@ fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<
     let mut best_val = -INF;
     let mut best = None;
     let mut alpha = VMIN;
+    // Root mover's draw value (the mover IS the root here). With Feat::no_draw_sac, a marginal
+    // losing capture is capped just below this so it never wins over an available draw.
+    let draw_v = -cfg.contempt;
     for &m in &mv {
-        let v = move_value(st, m, depth, alpha, VMAX, cfg, ctx)?;
+        let mut v = move_value(st, m, depth, alpha, VMAX, cfg, ctx)?;
+        // Don't shed material to dodge a draw: cap an obvious losing capture just below the
+        // draw value, UNLESS it's clearly winning (value ≥ 0.3 — a real sacrifice keeps its
+        // worth). Root-only; leaves the deep search untouched.
+        if cfg.feat.no_draw_sac && v < 0.3 && losing_capture(st, m, &cfg.values) {
+            v = v.min(draw_v - 1e-3);
+        }
         if v > best_val {
             best_val = v;
             best = Some(m);

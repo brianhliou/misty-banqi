@@ -1,4 +1,12 @@
-//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.1.
+//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.2.
+//!
+//! v0.2.2: anti-draw-sac root guard (`no_draw_sac`, Feat bit 512). At the ROOT, a marginal
+//! move (eval < +0.3) that makes an obviously losing capture (crude SEE: a higher-value
+//! attacker takes a lower-value victim that an enemy can recapture) is clamped below the draw
+//! value, so the engine never sheds material into a position it can't convert and then takes
+//! the draw anyway. Diagnosed from a live game where, up material it couldn't convert, the
+//! engine played advisor-takes-horse into an advisor recapture and then accepted the draw.
+//! Measured (~385-game paired bakeoffs): no regression — losses 33→19, win% +1.2.
 //!
 //! v0.2.1: general-safety eval term (`gen_danger`, Feat bit 256, weighted by w_king=28).
 //! Proximity+escape-aware: penalizes the general being threatened by an enemy soldier along
@@ -36,13 +44,13 @@ mod engine;
 
 use std::io::{self, BufRead, Write};
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.1";
+const ENGINE_NAME: &str = "MistyBanqi 0.2.2";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
-// = 506. The +256 is the v0.2.1 general-safety term (proximity+escape-aware), weighted by
-// w_king below. Ordering(1)/LMR(4) stay off (neutral in testing).
-const FEATURES: u32 = 506;
+// + no_draw_sac(512) = 1018. The +256 is the v0.2.1 general-safety term (weighted by w_king
+// below); the +512 is the v0.2.2 anti-draw-sac root guard. Ordering(1)/LMR(4) stay off (neutral).
+const FEATURES: u32 = 1018;
 // Corrected value table (gen,adv,ele,cha,hor,can,sol): the original had cannon UNDER-valued
 // (12) and chariot OVER-valued (14) — a real eval bug. Cannon is banqi's most tactically
 // dominant piece (screen capture); chariot is mid-ladder. This fix alone was ~+10%.

@@ -34,7 +34,9 @@ expanding all ~14 of them. Decision nodes are ordinary negamax with αβ.
 
 **The usual machinery, tuned for Banqi:** a Zobrist transposition table keyed on
 (board, bag, side-to-move); repetition detection (so it avoids shuffling into draws when
-ahead and seeks them when losing, via contempt); quiescence over captures; and iterative
+ahead and seeks them when losing, via contempt) plus a root anti-draw-sac guard (it won't
+shed material into a losing capture just to score a hair above an available draw);
+quiescence over captures; and iterative
 deepening under a node budget (so strength is CPU-independent — `go nodes N`).
 
 **Evaluation — handcrafted, measured.** Material on a corrected value table, covered-piece
@@ -87,7 +89,7 @@ The UCI binary (no Python needed):
 
 ```sh
 cargo build --release -p banqi-engine
-echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.1 ...
+echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.2 ...
 ```
 
 Drive it over UCI with a Banqi FEN (face-down tile = `X`; turn `r`/`b`/`-`; then the bag
