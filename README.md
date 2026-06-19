@@ -1,5 +1,9 @@
 # MistyBanqi
 
+[![ci](https://github.com/brianhliou/misty-banqi/actions/workflows/ci.yml/badge.svg)](https://github.com/brianhliou/misty-banqi/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/brianhliou/misty-banqi)](https://github.com/brianhliou/misty-banqi/releases/latest)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A [Banqi](https://en.wikipedia.org/wiki/Banqi) (Chinese Dark Chess) engine in Rust —
 αβ search with **Star1 chance-node expectiminimax** for the game's hidden-tile flips,
 a transposition table, repetition handling, quiescence, and a handcrafted evaluation.
