@@ -1,0 +1,12 @@
+[package]
+name = "banqi-engine"
+version = "0.2.1"
+edition = "2021"
+authors = ["Brian Liou"]
+description = "MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine."
+license = "MIT"
+repository = "https://github.com/brianhliou/misty-banqi"
+
+[[bin]]
+name = "banqi-engine"
+path = "src/main.rs"

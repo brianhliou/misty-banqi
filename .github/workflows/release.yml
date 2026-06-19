@@ -1,0 +1,34 @@
+name: release
+# Tag a version (e.g. `git tag v0.2.1 && git push --tags`) → build the x86-64 Linux
+# binary and publish it as a GitHub release asset. Downstreams can curl the binary at
+# https://github.com/<owner>/misty-banqi/releases/latest/download/banqi-engine
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable, minimal)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Build (release, x86-64 linux)
+        run: cargo build --release -p banqi-engine
+      - name: Stage binary + checksum
+        run: |
+          mkdir -p dist
+          cp target/release/banqi-engine dist/banqi-engine
+          sha256sum dist/banqi-engine | awk '{print $1}' > dist/banqi-engine.sha256
+          echo "uci" | ./dist/banqi-engine | head -3
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/banqi-engine
+            dist/banqi-engine.sha256
+          generate_release_notes: true

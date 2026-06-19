@@ -1,0 +1,11 @@
+# Workspace: the engine core + Python (PyO3) bindings (`banqi_rust`) and the
+# standalone UCI binary (`banqi-engine`). The binary `#[path]`-includes the engine
+# core directly, so it has no crate dependency on `banqi_rust` and builds without
+# Python — `cargo build -p banqi-engine` never compiles the PyO3 extension.
+[workspace]
+members = ["banqi_rust", "banqi-engine"]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1

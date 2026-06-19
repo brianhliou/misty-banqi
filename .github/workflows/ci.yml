@@ -1,0 +1,24 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable, minimal)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Build the UCI binary
+        run: cargo build --release -p banqi-engine
+      - name: Run tests
+        # -p banqi-engine pulls the engine core via #[path] (no Python), so this runs
+        # the engine's embedded tests (fen/result, incl. the early-adjudication rule)
+        # plus the binary-level invariant tests.
+        run: cargo test -p banqi-engine
+      - name: UCI smoke test
+        run: |
+          echo "uci" | ./target/release/banqi-engine | grep -q "id name MistyBanqi"
+          echo "OK: engine self-reports + responds to uci"

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7"]
+build-backend = "maturin"
+
+[project]
+name = "banqi_rust"
+version = "0.2.1"
+description = "MistyBanqi engine core (Banqi / Chinese Dark Chess) — Python bindings"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.maturin]
+module-name = "banqi_rust"
