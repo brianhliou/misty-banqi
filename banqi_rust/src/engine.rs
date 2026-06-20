@@ -538,20 +538,28 @@ impl State {
             }
             return if (1 - mc) == 0 { RES_RED } else { RES_BLACK };
         }
-        // Early adjudication of a decided game (parity with the reference rules
-        // implementations): if the side NOT
-        // to move has been wiped out (no piece on the board AND no face-down tile
-        // left to flip) it can never act again, so the mover wins now instead of one
-        // ply later. The scan short-circuits on the first face-down tile or
-        // waiting-colored piece, so it costs ~nothing outside the wiped-out endgame.
+        // Provable-elimination adjudication (parity with the reference rule
+        // implementations). A side is finished the moment it has no piece on the board
+        // AND no tile of its colour left in the bag to ever flip up: it can never hold
+        // a piece again, so every remaining turn of its is a forced flip of an opponent
+        // tile ending in a certain no-legal-move loss. Adjudicate now — outcome-
+        // identical, just sooner. The bag is public to both seats (already used by the
+        // material eval), so reading it here leaks nothing; the scans short-circuit, so
+        // it costs ~nothing outside the wiped-out endgame.
         let mc = self.mover_color();
         if mc >= 0 {
+            let has = |color: i16| -> bool {
+                let base = (color as usize) * 7;
+                self.bag[base..base + 7].iter().any(|&n| n > 0)
+                    || self.sq.iter().any(|&c| is_piece(c) && code_color(c) == color)
+            };
             let waiting = 1 - mc;
-            let waiting_alive = self
-                .sq
-                .iter()
-                .any(|&c| c == DOWN || (is_piece(c) && code_color(c) == waiting));
-            if !waiting_alive {
+            if !has(mc) {
+                // The side to move is provably eliminated → it loses.
+                return if mc == 0 { RES_BLACK } else { RES_RED };
+            }
+            if !has(waiting) {
+                // The waiting side is provably eliminated → the mover wins.
                 return if mc == 0 { RES_RED } else { RES_BLACK };
             }
         }
@@ -1918,13 +1926,27 @@ mod result_tests {
         let mut mv = Vec::new();
         assert_eq!(st.result(&mut mv), RES_BLACK); // ...but the game is decided
 
-        // A lone face-down tile keeps RED potentially alive (it could flip) → ongoing.
+        // A lone RED face-down tile keeps RED potentially alive (it could flip up as
+        // RED) → ongoing. Each face-down square has a matching bag entry, as in play.
         let mut sq2 = vec![EMPTY; NSQ];
         at(&mut sq2, 0, BLACK_GENERAL);
         at(&mut sq2, 31, DOWN);
-        let st2 = make_state(sq2, vec![], 0, 1, 0);
+        let mut red_bag = vec![0u32; 14];
+        red_bag[6] = 1; // a red soldier still in the pool
+        let st2 = make_state(sq2, red_bag, 0, 1, 0);
         let mut mv2 = Vec::new();
         assert_eq!(st2.result(&mut mv2), RES_ONGOING);
+
+        // ...but a lone BLACK face-down tile cannot save RED: it can never flip up its
+        // own colour, so RED is provably eliminated and BLACK wins even with a tile left.
+        let mut sq2b = vec![EMPTY; NSQ];
+        at(&mut sq2b, 0, BLACK_GENERAL);
+        at(&mut sq2b, 31, DOWN);
+        let mut black_bag = vec![0u32; 14];
+        black_bag[13] = 1; // a black soldier still in the pool
+        let st2b = make_state(sq2b, black_bag, 0, 1, 0);
+        let mut mv2b = Vec::new();
+        assert_eq!(st2b.result(&mut mv2b), RES_BLACK);
 
         // RED still has a piece on a fully-revealed board → ongoing.
         let mut sq3 = vec![EMPTY; NSQ];
@@ -1933,6 +1955,25 @@ mod result_tests {
         let st3 = make_state(sq3, vec![], 0, 1, 0);
         let mut mv3 = Vec::new();
         assert_eq!(st3.result(&mut mv3), RES_ONGOING);
+    }
+
+    #[test]
+    fn wiped_out_side_to_move_with_only_opponent_tiles_loses_at_once() {
+        // RED to move (ply even, red bound first) with no piece and no RED tile in the
+        // bag — only a lone BLACK face-down tile remains. RED can legally flip it, but
+        // it can only ever reveal a BLACK piece, so RED is provably eliminated. BLACK
+        // wins now instead of RED being forced to flip BLACK's tiles out first.
+        let mut squares = vec![EMPTY; NSQ];
+        at(&mut squares, 0, BLACK_GENERAL); // a1
+        at(&mut squares, 31, DOWN); // h4 — a black tile (see bag)
+        let mut black_bag = vec![0u32; 14];
+        black_bag[13] = 1;
+        let st = make_state(squares, black_bag, 0, 0, 0); // ply 0 → RED to move
+        let mut probe = Vec::new();
+        st.legal_moves(&mut probe);
+        assert!(!probe.is_empty()); // RED still has a legal flip...
+        let mut mv = Vec::new();
+        assert_eq!(st.result(&mut mv), RES_BLACK); // ...yet RED is provably eliminated
     }
 }
 

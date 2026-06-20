@@ -3,6 +3,15 @@
 All notable changes to MistyBanqi. Strength figures are relative gains measured via
 large-scale paired-deal bakeoffs (see the README).
 
+## [0.2.3]
+
+- **Provable-elimination adjudication**: a side is now ruled lost the moment it has no
+  piece on the board and no tile of its colour left in the bag to ever flip up, instead
+  of only once every tile has been revealed. Such a side can never hold a piece again, so
+  the game ends immediately rather than forcing the doomed side to flip the opponent's
+  remaining tiles out first. Outcome-identical (same winner), just adjudicated sooner; the
+  draw clocks still take precedence. Mirrors the reference rule implementations.
+
 ## [0.2.2]
 
 - **Anti-draw-sac root guard** (`no_draw_sac`, Feat bit 512): at the root, a marginal move
