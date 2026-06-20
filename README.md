@@ -14,6 +14,11 @@ during play, so a move can be a deterministic move/capture **or** a chance event
 outcome is drawn from the bag of unrevealed pieces. That mix of decision nodes and chance
 nodes is what makes the search interesting — and it's the heart of this engine.
 
+**Play it** against the computer on [mistboard.com](https://mistboard.com/?play=computer&gameSpecId=banqi),
+where this engine ships as the Banqi opponent ([rules](https://mistboard.com/rules/banqi)).
+The full tuning story is on my blog:
+[Tuning a Banqi engine by fixing the measurement](https://brianhliou.com/posts/tuning-a-banqi-engine/).
+
 ## Strength (honest)
 
 A competent αβ CDC engine, tuned by **large-scale paired-deal bakeoffs** (every relative gain
