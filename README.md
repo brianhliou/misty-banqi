@@ -24,7 +24,8 @@ The full tuning story is on my blog:
 A competent αβ CDC engine, tuned by **large-scale paired-deal bakeoffs** (every relative gain
 below is measured that way — paired deals on identical hardware). In context:
 
-- It is **not** SOTA — the strong CDC programs (CLAP_CDC, DarkKnight) are closed and stronger.
+- It makes **no SOTA claim**. MistyBanqi has not played CLAP_CDC, DarkKnight,
+  or other top CDC programs, so there is no reproducible head-to-head result.
 - The interesting part isn't an absolute rating; it's *how* the strength was built — see the
   two engineering stories below.
 
@@ -78,9 +79,9 @@ hunting soldier arrives. Two things made this a good case study:
 ## Roadmap — the strength ceiling
 
 Handcrafted αβ has a ceiling: the cheap-eval climb plateaued and the latest
-term (general safety) bought robustness, not raw strength. The path to the level of the
-strong *closed* CDC engines is almost certainly a **learned value network** (AlphaZero-style
-— CLAP_CDC proves CDC is learnable to a high level). That's the north star.
+term (general safety) bought robustness, not raw strength. The next serious bet is a
+**learned value network** (AlphaZero-style). CLAP_CDC points in that direction, but
+MistyBanqi has not been tested against it.
 
 It's parked, gated on compute **and** engineering: a local self-play de-risk hasn't yet
 climbed past the αβ clone, so the cloud-scale spend isn't justified on local evidence alone
