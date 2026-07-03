@@ -4,98 +4,77 @@
 [![release](https://img.shields.io/github/v/release/brianhliou/misty-banqi)](https://github.com/brianhliou/misty-banqi/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A [Banqi](https://en.wikipedia.org/wiki/Banqi) (Chinese Dark Chess) engine in Rust —
-αβ search with **Star1 chance-node expectiminimax** for the game's hidden-tile flips,
-a transposition table, repetition handling, quiescence, and a handcrafted evaluation.
-Ships as a tiny UCI binary; the same search core is exposed to Python via PyO3.
+A [Banqi](https://en.wikipedia.org/wiki/Banqi) (Chinese Dark Chess) engine in Rust: αβ search
+with **Star1 chance-node expectiminimax** for the hidden-tile flips, a transposition table,
+repetition handling, quiescence, and a handcrafted evaluation. Ships as a tiny UCI binary, with
+the same search core exposed to Python via PyO3.
 
-Banqi is a hidden-information game: pieces start face-down and are *flipped* (revealed)
-during play, so a move can be a deterministic move/capture **or** a chance event whose
-outcome is drawn from the bag of unrevealed pieces. That mix of decision nodes and chance
-nodes is what makes the search interesting — and it's the heart of this engine.
+Banqi is a hidden-information game: pieces start face-down and flip to reveal during play, so a
+move is either a deterministic move/capture or a chance event drawn from the bag of unrevealed
+pieces. That mix of decision and chance nodes is the heart of the engine.
 
 <p align="center">
   <a href="https://mistboard.com/?play=computer&gameSpecId=banqi">
     <img src="assets/game.webp" alt="A full MistyBanqi game, tiles flipping and pieces trading until Black resigns a won-material position" width="560">
   </a>
   <br>
-  <sub><i>MistyBanqi (red) vs a human — green tiles flip to reveal pieces. Black wins the material but every piece is dominated by Red's elephant, and resigns. Rank beats material.</i></sub>
+  <sub><i>MistyBanqi (red) vs a human. Green tiles flip to reveal pieces; Black wins the material but every piece is dominated by Red's elephant, and resigns. Rank beats material.</i></sub>
 </p>
 
 **Play it** against the computer on [mistboard.com](https://mistboard.com/?play=computer&gameSpecId=banqi),
-where this engine ships as the Banqi opponent ([rules](https://mistboard.com/rules/banqi)).
-The full tuning story is on my blog:
+where this engine is the Banqi opponent ([rules](https://mistboard.com/rules/banqi)). The tuning
+story is on my blog:
 [Tuning a Banqi engine by fixing the measurement](https://brianhliou.com/posts/tuning-a-banqi-engine/).
 
-## Strength (honest)
+## Strength
 
-A competent αβ CDC engine, tuned by **large-scale paired-deal bakeoffs** (every relative gain
-below is measured that way — paired deals on identical hardware). In context:
-
-- It makes **no SOTA claim**. MistyBanqi has not played CLAP_CDC, DarkKnight,
-  or other top CDC programs, so there is no reproducible head-to-head result.
-- The interesting part isn't an absolute rating; it's *how* the strength was built — see the
-  two engineering stories below.
+A competent αβ CDC engine, tuned by large-scale paired-deal bakeoffs (every relative gain below is
+measured that way). It makes no SOTA claim: it has not played CLAP_CDC, DarkKnight, or other top
+programs, so there is no head-to-head result. The part worth reading is how the strength was built.
 
 ## How it works
 
-**Search — αβ + Star1 over a mixed decision/chance tree.**
-A flip is a chance node: the engine doesn't know which piece a face-down tile holds, only the
-public *bag* of remaining pieces. Star1 computes the expectiminimax value of a flip as the
-probability-weighted average over bag outcomes, with αβ-style bounds (`flip_value` in
-[`engine.rs`](banqi_rust/src/engine.rs)) so it prunes chance branches instead of always
-expanding all ~14 of them. Decision nodes are ordinary negamax with αβ.
+**Search: αβ + Star1 over a mixed decision/chance tree.** A flip is a chance node: the engine
+knows only the public bag of remaining pieces, not which one a given tile holds. Star1 takes the
+probability-weighted expectiminimax value over bag outcomes with αβ-style bounds (`flip_value` in
+[`engine.rs`](banqi_rust/src/engine.rs)), pruning chance branches instead of expanding all ~14.
+Decision nodes are ordinary αβ negamax.
 
-**The usual machinery, tuned for Banqi:** a Zobrist transposition table keyed on
-(board, bag, side-to-move); repetition detection (so it avoids shuffling into draws when
-ahead and seeks them when losing, via contempt) plus a root anti-draw-sac guard (it won't
-shed material into a losing capture just to score a hair above an available draw);
-quiescence over captures; and iterative
-deepening under a node budget (so strength is CPU-independent — `go nodes N`).
+**Machinery.** A Zobrist transposition table keyed on (board, bag, side-to-move); repetition
+detection with contempt (avoid draws when ahead, seek them when losing) plus a root anti-draw-sac
+guard; quiescence over captures; iterative deepening under a node budget, so strength is
+CPU-independent (`go nodes N`).
 
-**Evaluation — handcrafted, measured.** Material on a corrected value table, covered-piece
+**Evaluation, handcrafted and measured.** Material on a corrected value table, covered-piece
 ("full-alive") material so a flip never creates phantom value, value-aware mobility,
 context-dependent general value, an adaptive *domination* term (a piece is worth more as the
-enemy pieces that could capture it dwindle), and a general-safety term (below).
+enemies that could capture it dwindle), and a general-safety term.
 
-## Two engineering stories
+## Two tuning stories
 
-The code is a competent CDC engine; the part worth reading is *how it was tuned*.
+The engine is competent CDC; how it was tuned is the interesting part.
 
-**1. The cheap-strength climb (+16.6% win-rate in paired bakeoffs).**
-Stacking handcrafted eval terms, each gated behind a feature bit and validated by
-**cloud-scale paired-deal bakeoffs** (local 40-game matches are too noisy at Banqi's
-~56% draw rate to see a few-percent edge). The single biggest win was finding a **real
-bug in the value table** — the cannon (Banqi's most tactically dominant piece, via screen
-capture) was *under*-valued and the chariot *over*-valued; correcting the ordering alone
-was ~+10%.
+**Cheap-strength climb (+16.6% win-rate).** Stack handcrafted eval terms, each behind a feature
+bit and validated by cloud-scale paired-deal bakeoffs (local 40-game matches are too noisy at
+Banqi's ~56% draw rate to see a few-percent edge). The biggest single win was a bug in the value
+table: the cannon (the most tactically dominant piece, via screen capture) was undervalued and the
+chariot overvalued; fixing the order alone was ~+10%.
 
-**2. The general-safety term — and a lesson in measuring the right thing.**
-The engine would let its general get cornered and captured. The fix turned out to be
-"make luft": flip a face-down neighbor to give a boxed general a 2×2 escape *before* the
-hunting soldier arrives. Two things made this a good case study:
+**General-safety, and measuring the right thing.** The engine let its general get cornered and
+captured. The fix was "make luft": flip a face-down neighbor to give a boxed general a 2×2 escape
+before the hunting soldier arrives. Two lessons came out of it. Don't adjudicate a defensive idea
+with the engine's own evaluation: if the eval is blind to the danger, asking it "is this move
+good?" is circular, so the save was verified by exact analysis and a played-out line. And a
+defensive term is invisible to an opponent that can't exploit the weakness: against a baseline that
+doesn't hunt generals, win-rate barely moved, so a direct metric ("did we lose our own general?")
+was needed to see the real drop (35.5% → 26%).
 
-- **Don't adjudicate a defensive idea with the engine's own evaluation** — if the eval is
-  blind to the danger, asking it "is this move good?" is circular. The save was verified by
-  exact analysis and a played-out line, not by the engine's own score.
-- **A defensive term is invisible to an opponent that can't exploit the weakness.** Against
-  a baseline that doesn't hunt generals, win-rate barely moved — so a *direct* metric was added
-  ("did we lose our own general this game?"), which showed a real, significant drop
-  (35.5% → 26%) that win-rate alone hid. Picking the instrument that can actually *see* the
-  effect was the whole game.
+## Roadmap
 
-## Roadmap — the strength ceiling
-
-Handcrafted αβ has a ceiling: the cheap-eval climb plateaued and the latest
-term (general safety) bought robustness, not raw strength. The next serious bet is a
-**learned value network** (AlphaZero-style). CLAP_CDC points in that direction, but
-MistyBanqi has not been tested against it.
-
-It's parked, gated on compute **and** engineering: a local self-play de-risk hasn't yet
-climbed past the αβ clone, so the cloud-scale spend isn't justified on local evidence alone
-(open question — value-variance / capacity / implementation vs fundamental). αβ today is a
-deliberate, measured choice; a value net is the likely next leap once the de-risk clears and
-the compute is on the table.
+Handcrafted αβ has a ceiling: the cheap-eval climb has plateaued, and general-safety bought
+robustness over raw strength. The next bet is a learned value network (AlphaZero-style), parked on
+compute and engineering. A local self-play de-risk has not yet climbed past the αβ clone, so the
+cloud spend is not justified on local evidence alone.
 
 ## Build & run
 
@@ -106,8 +85,7 @@ cargo build --release -p banqi-engine
 echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.2 ...
 ```
 
-Drive it over UCI with a Banqi FEN (face-down tile = `X`; turn `r`/`b`/`-`; then the bag
-and clock):
+Drive it over UCI with a Banqi FEN (face-down tile = `X`; turn `r`/`b`/`-`; then the bag and clock):
 
 ```
 uci
@@ -133,12 +111,10 @@ banqi-engine/    standalone UCI binary (main.rs; #[path]-includes the core)
 
 ## Acknowledgements
 
-The handcrafted evaluation started from — and drew ideas out of —
-[george0828Zhang/chinese-dark-chess-hw](https://github.com/george0828Zhang/chinese-dark-chess-hw),
-which was also the fixed reference opponent the bakeoffs were tuned against during development.
-The context-dependent general value and the value-weighted mobility, in particular, are adapted
-from it.
+The handcrafted evaluation started from [george0828Zhang/chinese-dark-chess-hw](https://github.com/george0828Zhang/chinese-dark-chess-hw),
+which was also the fixed reference opponent the bakeoffs were tuned against. The context-dependent
+general value and the value-weighted mobility, in particular, are adapted from it.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
