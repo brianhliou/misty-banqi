@@ -18,13 +18,12 @@ pieces. That mix of decision and chance nodes is the heart of the engine.
     <img src="assets/game.webp" alt="A full MistyBanqi game, tiles flipping and pieces trading until Black resigns a won-material position" width="560">
   </a>
   <br>
-  <sub><i>MistyBanqi (red) vs a human. Green tiles flip to reveal pieces; Black wins the material but every piece is dominated by Red's elephant, and resigns. Rank beats material.</i></sub>
+  <sub><i>MistyBanqi (red) vs a human: Black wins the material but resigns, every piece dominated by Red's elephant. Rank beats material.</i></sub>
 </p>
 
 **Play it** against the computer on [mistboard.com](https://mistboard.com/?play=computer&gameSpecId=banqi),
-where this engine is the Banqi opponent ([rules](https://mistboard.com/rules/banqi)). The tuning
-story is on my blog:
-[Tuning a Banqi engine by fixing the measurement](https://brianhliou.com/posts/tuning-a-banqi-engine/).
+where this engine is the Banqi opponent ([rules](https://mistboard.com/rules/banqi)). Full build
+report: [Building a Banqi Engine](https://brianhliou.com/posts/building-banqi-engine/).
 
 ## Strength
 
