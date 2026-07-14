@@ -1,4 +1,8 @@
-//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.2.
+//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.4.
+//!
+//! v0.2.4: emit `info … score cp` before `bestmove` in the `go` handler. The search already
+//! computes the root value (~[-1, 1], side-to-move); the front-end now surfaces it (×1000 →
+//! centipawns) so whole-game analysis can read a per-position eval. Move selection unchanged.
 //!
 //! v0.2.2: anti-draw-sac root guard (`no_draw_sac`, Feat bit 512). At the ROOT, a marginal
 //! move (eval < +0.3) that makes an obviously losing capture (crude SEE: a higher-value
@@ -32,7 +36,8 @@
 //!                         since; we replay them to seed the search's repetition history so the
 //!                         engine avoids/seeks threefold (perpetual-chase) draws instead of
 //!                         shuffling into them blind. FEN-only (no moves) = prior behavior.
-//!   go [movetime <ms>] [nodes <n>]  -> search, emit "bestmove <uci>" (or "(none)")
+//!   go [movetime <ms>] [nodes <n>]  -> search, emit "info … score cp <n> pv <uci>" then
+//!                         "bestmove <uci>" (or "bestmove (none)")
 //!   quit              -> exit
 //!
 //! The FEN/move contract is defined in `engine.rs` (see its FEN+UCI section). The engine
@@ -44,7 +49,7 @@ mod engine;
 
 use std::io::{self, BufRead, Write};
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.2";
+const ENGINE_NAME: &str = "MistyBanqi 0.2.4";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
@@ -61,12 +66,13 @@ fn search_best(
     window_moves: &[(u8, u8)],
     movetime_ms: u64,
     node_budget: u64,
-) -> String {
+) -> (String, i64) {
     // `p` is the position at the window start (last irreversible move); `window_moves`
-    // are the quiet plies since. best_move_with_moves replays them to seed the search's
-    // repetition history, so the engine sees threefold from real game history rather than
-    // shuffling into it. No `moves` ⇒ empty window ⇒ identical to the prior FEN-only search.
-    let (frm, to) = engine::best_move_with_moves(
+    // are the quiet plies since. best_move_with_moves_scored replays them to seed the
+    // search's repetition history, so the engine sees threefold from real game history
+    // rather than shuffling into it. No `moves` ⇒ empty window ⇒ identical to the prior
+    // FEN-only search. The scored variant also returns the root value (~[-1, 1]).
+    let ((frm, to), score) = engine::best_move_with_moves_scored(
         p.squares.clone(),
         p.bag.clone(),
         p.first_color,
@@ -83,9 +89,12 @@ fn search_best(
         FEATURES,
     );
     if frm == 255 {
-        "(none)".to_string()
+        ("(none)".to_string(), 0)
     } else {
-        engine::move_to_uci((frm, to))
+        // Root value is side-to-move win-ness in ~[-1, 1]; ×1000 maps it onto the platform's
+        // centipawn win% curve (±1 ≈ decisive ≈ ±1000 cp). Clamp guards any terminal sentinel.
+        let cp = (score.clamp(-1.0, 1.0) * 1000.0).round() as i64;
+        (engine::move_to_uci((frm, to)), cp)
     }
 }
 
@@ -147,11 +156,20 @@ fn main() {
                         _ => {}
                     }
                 }
-                let mv = match &current {
-                    Some(p) => search_best(p, &current_moves, movetime, nodes),
-                    None => "(none)".to_string(),
-                };
-                println!("bestmove {mv}");
+                match &current {
+                    Some(p) => {
+                        let (uci, cp) = search_best(p, &current_moves, movetime, nodes);
+                        if uci == "(none)" {
+                            println!("bestmove (none)");
+                        } else {
+                            // `info … score cp` is what whole-game analysis reads; bestmove
+                            // alone drives PvE play. Emit both.
+                            println!("info score cp {cp} pv {uci}");
+                            println!("bestmove {uci}");
+                        }
+                    }
+                    None => println!("bestmove (none)"),
+                }
             }
             "quit" => break,
             _ => {}

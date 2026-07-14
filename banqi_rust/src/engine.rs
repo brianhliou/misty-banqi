@@ -1114,7 +1114,7 @@ fn losing_capture(st: &State, m: (u8, u8), values: &[f64; 7]) -> bool {
     false
 }
 
-fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<(u8, u8)>, ()> {
+fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
@@ -1149,7 +1149,9 @@ fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<
             }
         }
     }
-    Ok(best)
+    // The chosen move AND its root value (side-to-move perspective, ~[-1, 1]) so callers
+    // can surface an eval, not just the move. Move selection is unchanged.
+    Ok(best.map(|m| (m, best_val)))
 }
 
 /// Like `best_at_depth` but returns the chosen move AND its root negamax value
@@ -1205,6 +1207,7 @@ fn make_state(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_p
 }
 
 /// Node-budgeted iterative deepening. Returns (from, to); a flip is from==to.
+#[allow(clippy::too_many_arguments)]
 pub fn best_move(
     squares: Vec<i16>,
     bag: Vec<u32>,
@@ -1222,11 +1225,39 @@ pub fn best_move(
     features: u32,
     rep_history: Vec<u64>,
 ) -> (u8, u8) {
+    best_move_scored(
+        squares, bag, first_color, ply, no_progress, node_budget, contempt, quiesce_on, max_depth,
+        w_mob, w_king, values, time_ms, features, rep_history,
+    )
+    .0
+}
+
+/// Like `best_move` but also returns the root value (side-to-move perspective, ~[-1, 1])
+/// from the deepest completed depth. Move selection is identical to `best_move`; the extra
+/// value lets the UCI front-end emit an `info … score` line for whole-game analysis.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_scored(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    ply: u32,
+    no_progress: u32,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    rep_history: Vec<u64>,
+) -> ((u8, u8), f64) {
     let st = make_state(squares, bag, first_color, ply, no_progress);
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
-        return (255, 255);
+        return ((255, 255), 0.0);
     }
     order(&st, &mut mv);
     let vals = to_values(&values);
@@ -1248,17 +1279,19 @@ pub fn best_move(
         }
     }
     let mut best = mv[0];
+    let mut best_score = 0.0f64;
     let mut hint: Option<(u8, u8)> = None;
     for depth in 1..=max_depth {
         match best_at_depth(&st, depth, &cfg, &mut ctx, hint) {
-            Ok(Some(m)) => {
+            Ok(Some((m, v))) => {
                 best = m;
+                best_score = v;
                 hint = Some(m);
             }
             _ => break,
         }
     }
-    best
+    (best, best_score)
 }
 
 /// Like `best_move`, but the caller supplies the repetition WINDOW as a FEN at the last
@@ -1294,6 +1327,51 @@ pub fn best_move_with_moves(
         st.push(frm, to, -1); // quiet move (no flip/capture inside a repetition window)
     }
     best_move(
+        st.sq.to_vec(),
+        st.bag.to_vec(),
+        st.first_color,
+        st.ply,
+        st.no_progress,
+        node_budget,
+        contempt,
+        quiesce_on,
+        max_depth,
+        w_mob,
+        w_king,
+        values,
+        time_ms,
+        features,
+        rep_history,
+    )
+}
+
+/// Like `best_move_with_moves` but also returns the root value (~[-1, 1]) from the deepest
+/// completed depth — the UCI front-end uses it to emit an `info … score` line. One search;
+/// move selection is identical to `best_move_with_moves`.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_with_moves_scored(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    no_progress: u32,
+    window_moves: Vec<(u8, u8)>,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+) -> ((u8, u8), f64) {
+    let mut st = make_state(squares, bag, first_color, 0, no_progress);
+    let mut rep_history: Vec<u64> = Vec::with_capacity(window_moves.len());
+    for (frm, to) in window_moves {
+        rep_history.push(zkey(&st));
+        st.push(frm, to, -1); // quiet move (no flip/capture inside a repetition window)
+    }
+    best_move_scored(
         st.sq.to_vec(),
         st.bag.to_vec(),
         st.first_color,
