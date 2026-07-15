@@ -1,0 +1,18 @@
+[package]
+name = "banqi-wasm"
+version = "0.2.4"
+edition = "2021"
+authors = ["Brian Liou"]
+description = "MistyBanqi — WebAssembly build of the Banqi engine core for the in-browser review/analysis panel (client-side MultiPV)."
+license = "MIT"
+repository = "https://github.com/brianhliou/misty-banqi"
+
+# Like `banqi-engine`, this crate `#[path]`-includes the engine core directly, so it has
+# no crate dependency on `banqi_rust` and never pulls in PyO3 — it compiles clean to
+# wasm32-unknown-unknown. Build with: `wasm-pack build banqi-wasm --target web --release`.
+[lib]
+name = "banqi_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"

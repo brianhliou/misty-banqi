@@ -3,7 +3,7 @@
 # core directly, so it has no crate dependency on `banqi_rust` and builds without
 # Python — `cargo build -p banqi-engine` never compiles the PyO3 extension.
 [workspace]
-members = ["banqi_rust", "banqi-engine"]
+members = ["banqi_rust", "banqi-engine", "banqi-wasm"]
 resolver = "2"
 
 [profile.release]

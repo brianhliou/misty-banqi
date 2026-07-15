@@ -12,7 +12,29 @@
 //!   bag: [u32; 14] indexed by the piece code (count of unrevealed of that type)
 
 use std::sync::OnceLock;
+
+// Time source. Native targets use the real monotonic clock. On wasm32 (the
+// in-browser client engine), `std::time::Instant::now()` panics — there is no
+// monotonic clock in `wasm32-unknown-unknown` — so we substitute a no-op clock.
+// The wasm shim always drives search by the node budget (it passes time_ms = 0),
+// so `elapsed()` is never consulted; returning a zero duration keeps `tick()`'s
+// wall-clock branch inert even if a caller ever passed a non-zero limit. Native
+// behavior (UCI binary, PyO3 bindings) is unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct Instant;
+#[cfg(target_arch = "wasm32")]
+impl Instant {
+    fn now() -> Self {
+        Instant
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(0)
+    }
+}
 
 const W: i32 = 8;
 const H: i32 = 4;
