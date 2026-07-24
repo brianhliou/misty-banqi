@@ -100,11 +100,22 @@ maturin develop --release -m banqi_rust/Cargo.toml
 python -c "import banqi_rust; print([f for f in dir(banqi_rust) if not f.startswith('_')])"
 ```
 
+The browser build is single-threaded WebAssembly:
+
+```sh
+wasm-pack build banqi-wasm --target web --release
+```
+
+It exposes one-shot `analyze` plus a stateful `AnalysisSession`. Repeated bounded
+`step(nodes)` calls preserve iterative-deepening state, the transposition table, and
+move-ordering history while giving the browser a cancellation boundary between slices.
+
 ## Layout
 
 ```
 banqi_rust/      engine core (engine.rs) + PyO3 Python bindings (lib.rs)
 banqi-engine/    standalone UCI binary (main.rs; #[path]-includes the core)
+banqi-wasm/      wasm-bindgen browser API, including incremental analysis sessions
 .github/workflows/  ci (build + uci smoke) and release (tag → published binary)
 ```
 

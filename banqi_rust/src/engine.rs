@@ -1462,6 +1462,10 @@ pub fn search_value(
 /// unavoidable loss pushed past the search depth, so a doomed-piece move scores a phantom
 /// gain) apart from CORRECT abandonment (all defenses score equally lost). Flips get their
 /// Star1 expectation via `move_value`. Returns (from, to, value, depth_reached) per move.
+///
+/// The one-shot API is a compatibility wrapper around [`RootAnalysisSession`]. Browser
+/// continuous analysis owns that session directly so bounded worker slices retain the TT,
+/// killer/history ordering, and partial-depth search work.
 #[allow(clippy::too_many_arguments)]
 pub fn root_move_values(
     squares: Vec<i16>,
@@ -1479,52 +1483,171 @@ pub fn root_move_values(
     time_ms: u64,
     features: u32,
 ) -> Vec<(u8, u8, f64, i32)> {
-    let st = make_state(squares, bag, first_color, ply, no_progress);
-    let vals = to_values(&values);
-    let cfg = Cfg { contempt, root: st.mover_color(), quiesce: quiesce_on, quiesce_max: 8, w_mob, w_king, values: vals, feat: Feat::from_bits(features) };
-    let mut ctx = Ctx::new(node_budget, time_ms, max_depth, if features & 2 != 0 { 18 } else { 0 });
-    let mut mv: Vec<(u8, u8)> = Vec::new();
-    st.legal_moves(&mut mv);
-    if mv.is_empty() {
-        return Vec::new();
-    }
-    // Mirror best_move's repetition seeding: push the root key once; negamax balances
-    // its own push/pop above this entry across all ID depths.
-    if cfg.feat.rep {
-        ctx.path.push(zkey(&st));
-    }
-    let mut completed: Vec<(u8, u8, f64)> = Vec::new();
-    let mut depth_reached = 0;
-    let mut hint: Option<(u8, u8)> = None;
-    for depth in 1..=max_depth {
-        order_moves(&st, &mut mv, depth, &cfg, &mut ctx);
-        if let Some(h) = hint {
-            if let Some(pos) = mv.iter().position(|&x| x == h) {
-                mv.remove(pos);
-                mv.insert(0, h);
-            }
+    let mut session = RootAnalysisSession::new(
+        squares,
+        bag,
+        first_color,
+        ply,
+        no_progress,
+        contempt,
+        quiesce_on,
+        max_depth,
+        w_mob,
+        w_king,
+        values,
+        time_ms,
+        features,
+    );
+    session.advance(node_budget)
+}
+
+/// Incremental root analysis for browser workers.
+///
+/// Each [`advance`](Self::advance) call receives a bounded node slice. Completed depths
+/// are published atomically, while the TT and move-ordering heuristics from an interrupted
+/// depth remain useful to the next slice. Clearing the repetition path between slices keeps
+/// a budget abort from leaving stale ancestors behind.
+pub struct RootAnalysisSession {
+    st: State,
+    cfg: Cfg,
+    max_depth: i32,
+    ctx: Ctx,
+    moves: Vec<(u8, u8)>,
+    completed: Vec<(u8, u8, f64)>,
+    depth_reached: i32,
+    hint: Option<(u8, u8)>,
+    total_nodes: u64,
+}
+
+impl RootAnalysisSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        squares: Vec<i16>,
+        bag: Vec<u32>,
+        first_color: i16,
+        ply: u32,
+        no_progress: u32,
+        contempt: f64,
+        quiesce_on: bool,
+        max_depth: i32,
+        w_mob: f64,
+        w_king: f64,
+        values: Vec<f64>,
+        time_ms: u64,
+        features: u32,
+    ) -> Self {
+        let st = make_state(squares, bag, first_color, ply, no_progress);
+        let cfg = Cfg {
+            contempt,
+            root: st.mover_color(),
+            quiesce: quiesce_on,
+            quiesce_max: 8,
+            w_mob,
+            w_king,
+            values: to_values(&values),
+            feat: Feat::from_bits(features),
+        };
+        let mut moves = Vec::new();
+        st.legal_moves(&mut moves);
+        Self {
+            st,
+            cfg,
+            max_depth,
+            ctx: Ctx::new(
+                1,
+                time_ms,
+                max_depth,
+                if features & 2 != 0 { 18 } else { 0 },
+            ),
+            moves,
+            completed: Vec::new(),
+            depth_reached: 0,
+            hint: None,
+            total_nodes: 0,
         }
-        let mut this: Vec<(u8, u8, f64)> = Vec::with_capacity(mv.len());
-        let mut aborted = false;
-        for &m in &mv {
-            // Full window per move (no alpha narrowing across siblings) → exact values.
-            match move_value(&st, m, depth, VMIN, VMAX, &cfg, &mut ctx) {
-                Ok(v) => this.push((m.0, m.1, v)),
-                Err(_) => {
-                    aborted = true;
-                    break;
+    }
+
+    pub fn advance(&mut self, node_budget: u64) -> Vec<(u8, u8, f64, i32)> {
+        if self.moves.is_empty() || self.depth_reached >= self.max_depth {
+            return self.results();
+        }
+
+        self.ctx.nodes = 0;
+        self.ctx.budget = node_budget.max(1);
+        self.ctx.start = Instant::now();
+        // A budget abort can return before every ancestor pops its repetition key.
+        self.ctx.path.clear();
+
+        for depth in (self.depth_reached + 1)..=self.max_depth {
+            if self.cfg.feat.rep {
+                self.ctx.path.clear();
+                self.ctx.path.push(zkey(&self.st));
+            }
+            order_moves(
+                &self.st,
+                &mut self.moves,
+                depth,
+                &self.cfg,
+                &mut self.ctx,
+            );
+            if let Some(h) = self.hint {
+                if let Some(pos) = self.moves.iter().position(|&x| x == h) {
+                    self.moves.remove(pos);
+                    self.moves.insert(0, h);
                 }
             }
+            let mut this = Vec::with_capacity(self.moves.len());
+            let mut aborted = false;
+            for &m in &self.moves {
+                match move_value(
+                    &self.st,
+                    m,
+                    depth,
+                    VMIN,
+                    VMAX,
+                    &self.cfg,
+                    &mut self.ctx,
+                ) {
+                    Ok(v) => this.push((m.0, m.1, v)),
+                    Err(()) => {
+                        aborted = true;
+                        break;
+                    }
+                }
+            }
+            if aborted {
+                break;
+            }
+            this.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then((a.0, a.1).cmp(&(b.0, b.1)))
+            });
+            self.hint = this.first().map(|&(f, t, _)| (f, t));
+            self.completed = this;
+            self.depth_reached = depth;
         }
-        if aborted {
-            break;
-        }
-        this.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        hint = Some((this[0].0, this[0].1));
-        completed = this;
-        depth_reached = depth;
+
+        self.total_nodes = self
+            .total_nodes
+            .saturating_add(self.ctx.nodes.min(self.ctx.budget));
+        self.results()
     }
-    completed.into_iter().map(|(f, t, v)| (f, t, v, depth_reached)).collect()
+
+    pub fn depth(&self) -> i32 {
+        self.depth_reached
+    }
+
+    pub fn total_nodes(&self) -> u64 {
+        self.total_nodes
+    }
+
+    fn results(&self) -> Vec<(u8, u8, f64, i32)> {
+        self.completed
+            .iter()
+            .map(|&(f, t, v)| (f, t, v, self.depth_reached))
+            .collect()
+    }
 }
 
 /// Full-window, no-quiescence, no-contempt negamax value — for the parity test
@@ -1996,6 +2119,41 @@ mod fen_tests {
         assert_eq!(uci_to_move("a0a0"), Some((0, 0))); // flip
         assert_eq!(uci_to_move("z9z9"), None);
     }
+
+    #[test]
+    fn incremental_root_analysis_retains_completed_work_across_slices() {
+        let pool = "G1A2E2R2H2C2S5g1a2e2r2h2c2s5";
+        let parsed =
+            state_from_fen(&format!("XXXXXXXX/XXXXXXXX/XXXXXXXX/XXXXXXXX - {pool} 0 1"))
+                .expect("opening fen");
+        let mut session = RootAnalysisSession::new(
+            parsed.squares,
+            parsed.bag,
+            parsed.first_color,
+            0,
+            parsed.no_progress,
+            0.1,
+            true,
+            24,
+            0.8,
+            28.0,
+            vec![30.0, 14.0, 11.0, 9.0, 7.0, 16.0, 4.0],
+            0,
+            1018,
+        );
+
+        let first = session.advance(360_000);
+        let first_depth = session.depth();
+        assert_eq!(first.len(), 32);
+        assert!(first_depth >= 1);
+        assert_eq!(session.total_nodes(), 360_000);
+
+        let second = session.advance(360_000);
+        assert_eq!(second.len(), 32);
+        assert!(session.depth() >= first_depth);
+        assert_eq!(session.total_nodes(), 720_000);
+        assert!(second.iter().all(|line| line.3 == session.depth()));
+    }
 }
 
 #[cfg(test)]
@@ -2076,5 +2234,3 @@ mod result_tests {
         assert_eq!(st.result(&mut mv), RES_BLACK); // ...yet RED is provably eliminated
     }
 }
-
-
