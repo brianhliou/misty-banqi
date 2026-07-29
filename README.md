@@ -15,10 +15,10 @@ pieces. That mix of decision and chance nodes is the heart of the engine.
 
 <p align="center">
   <a href="https://mistboard.com/?play=computer&gameSpecId=banqi">
-    <img src="assets/game.webp" alt="A full MistyBanqi game, tiles flipping and pieces trading until Black resigns a won-material position" width="560">
+    <img src="assets/game.webp" alt="A full MistyBanqi self-play game, tiles flipping and pieces trading until Red has nothing left on the board" width="560">
   </a>
   <br>
-  <sub><i>MistyBanqi (red) vs a human: Black wins the material but resigns, every piece dominated by Red's elephant. Rank beats material.</i></sub>
+  <sub><i>MistyBanqi against itself at full strength (1.5M nodes a move): 100 plies, 21 captures, and Black takes the last red piece off the board.</i></sub>
 </p>
 
 **Play it** against the computer on [mistboard.com](https://mistboard.com/?play=computer&gameSpecId=banqi),
