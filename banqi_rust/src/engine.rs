@@ -1254,6 +1254,18 @@ pub fn best_move(
     .0
 }
 
+/// What a search actually CONSUMED, as opposed to what it was allowed. `nodes` is the real
+/// visited-node count (never the budget echoed back) and `depth` is the last iterative-deepening
+/// iteration that ran to COMPLETION (0 if even the first one was cut short — an incomplete depth
+/// is discarded, so it is not "reached"). A caller comparing these against the budget it handed
+/// in can tell a work-bound search from a time-bound one: nodes at the cap means the node budget
+/// bound, nodes far short of it with the clock at the ceiling means the host was slow.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SearchStats {
+    pub nodes: u64,
+    pub depth: i32,
+}
+
 /// Like `best_move` but also returns the root value (side-to-move perspective, ~[-1, 1])
 /// from the deepest completed depth. Move selection is identical to `best_move`; the extra
 /// value lets the UCI front-end emit an `info … score` line for whole-game analysis.
@@ -1275,11 +1287,39 @@ pub fn best_move_scored(
     features: u32,
     rep_history: Vec<u64>,
 ) -> ((u8, u8), f64) {
+    let (m, score, _) = best_move_scored_stats(
+        squares, bag, first_color, ply, no_progress, node_budget, contempt, quiesce_on, max_depth,
+        w_mob, w_king, values, time_ms, features, rep_history,
+    );
+    (m, score)
+}
+
+/// Like `best_move_scored` but also returns what the search consumed (`SearchStats`). This is
+/// the body `best_move_scored` funnels into: the search itself is byte-for-byte the same, the
+/// stats are read off the counters `Ctx` already keeps to honour the node budget.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_scored_stats(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    ply: u32,
+    no_progress: u32,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    rep_history: Vec<u64>,
+) -> ((u8, u8), f64, SearchStats) {
     let st = make_state(squares, bag, first_color, ply, no_progress);
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
-        return ((255, 255), 0.0);
+        return ((255, 255), 0.0, SearchStats::default());
     }
     order(&st, &mut mv);
     let vals = to_values(&values);
@@ -1303,17 +1343,19 @@ pub fn best_move_scored(
     let mut best = mv[0];
     let mut best_score = 0.0f64;
     let mut hint: Option<(u8, u8)> = None;
+    let mut completed_depth = 0;
     for depth in 1..=max_depth {
         match best_at_depth(&st, depth, &cfg, &mut ctx, hint) {
             Ok(Some((m, v))) => {
                 best = m;
                 best_score = v;
                 hint = Some(m);
+                completed_depth = depth;
             }
             _ => break,
         }
     }
-    (best, best_score)
+    (best, best_score, SearchStats { nodes: ctx.nodes, depth: completed_depth })
 }
 
 /// Like `best_move`, but the caller supplies the repetition WINDOW as a FEN at the last
@@ -1387,13 +1429,40 @@ pub fn best_move_with_moves_scored(
     time_ms: u64,
     features: u32,
 ) -> ((u8, u8), f64) {
+    let (m, score, _) = best_move_with_moves_scored_stats(
+        squares, bag, first_color, no_progress, window_moves, node_budget, contempt, quiesce_on,
+        max_depth, w_mob, w_king, values, time_ms, features,
+    );
+    (m, score)
+}
+
+/// Like `best_move_with_moves_scored` but also returns what the search consumed
+/// (`SearchStats`), so the UCI front-end can report effort alongside the answer. Same body,
+/// same search, same move.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_with_moves_scored_stats(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    no_progress: u32,
+    window_moves: Vec<(u8, u8)>,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+) -> ((u8, u8), f64, SearchStats) {
     let mut st = make_state(squares, bag, first_color, 0, no_progress);
     let mut rep_history: Vec<u64> = Vec::with_capacity(window_moves.len());
     for (frm, to) in window_moves {
         rep_history.push(zkey(&st));
         st.push(frm, to, -1); // quiet move (no flip/capture inside a repetition window)
     }
-    best_move_scored(
+    best_move_scored_stats(
         st.sq.to_vec(),
         st.bag.to_vec(),
         st.first_color,
