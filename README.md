@@ -31,6 +31,10 @@ A competent αβ CDC engine, tuned by large-scale paired-deal bakeoffs (every re
 measured that way). It makes no SOTA claim: it has not played CLAP_CDC, DarkKnight, or other top
 programs, so there is no head-to-head result. The part worth reading is how the strength was built.
 
+MistyBanqi is the banqi bot on [mistboard.com](https://mistboard.com/rules/banqi), at 3.5M nodes a
+move. An engine that beats it at the same node budget over 200 games takes its seat, with your name
+on it; the terms are at [brianhliou.com/challenges](https://brianhliou.com/challenges/).
+
 ## How it works
 
 **Search: αβ + Star1 over a mixed decision/chance tree.** A flip is a chance node: the engine
