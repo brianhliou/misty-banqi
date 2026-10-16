@@ -769,6 +769,9 @@ struct Ctx {
     tt: Vec<TtEntry>,            // transposition table (empty unless Feat::tt)
     tt_mask: usize,              // index mask = tt.len()-1 (power of two)
     path: Vec<u64>,              // ancestor zkeys on the current search path (Feat::rep)
+    // UCI `go searchmoves`: the root may only pick from these moves. Empty = unrestricted.
+    // Read only at the root (`best_at_depth`); the tree below is never filtered.
+    root_moves: Vec<(u8, u8)>,
 }
 
 impl Ctx {
@@ -785,6 +788,7 @@ impl Ctx {
             tt: vec![TT_EMPTY; tt_size],
             tt_mask: tt_size.wrapping_sub(1),
             path: Vec::with_capacity(64),
+            root_moves: Vec::new(),
         }
     }
 
@@ -1136,9 +1140,22 @@ fn losing_capture(st: &State, m: (u8, u8), values: &[f64; 7]) -> bool {
     false
 }
 
+/// UCI `go searchmoves`: keep only the root moves named in `filter`. An empty filter, or one
+/// that matches no legal move, leaves `mv` untouched (search unrestricted), so a stale or
+/// unparseable list can never leave the engine without a move.
+fn restrict_root_moves(mv: &mut Vec<(u8, u8)>, filter: &[(u8, u8)]) {
+    if filter.is_empty() || !mv.iter().any(|m| filter.contains(m)) {
+        return;
+    }
+    mv.retain(|m| filter.contains(m));
+}
+
+// Root-only: the per-move children go through `move_value` -> `negamax`, never back here,
+// so `ctx.root_moves` filters the root and nothing below it.
 fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
+    restrict_root_moves(&mut mv, &ctx.root_moves);
     if mv.is_empty() {
         return Ok(None);
     }
@@ -1315,16 +1332,45 @@ pub fn best_move_scored_stats(
     features: u32,
     rep_history: Vec<u64>,
 ) -> ((u8, u8), f64, SearchStats) {
+    best_move_scored_stats_restricted(
+        squares, bag, first_color, ply, no_progress, node_budget, contempt, quiesce_on, max_depth,
+        w_mob, w_king, values, time_ms, features, rep_history, Vec::new(),
+    )
+}
+
+/// `best_move_scored_stats` with a UCI `searchmoves` root filter: the returned move is one of
+/// `search_moves` whenever any of them is legal. Empty (or nothing legal) = unrestricted.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_scored_stats_restricted(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    ply: u32,
+    no_progress: u32,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    rep_history: Vec<u64>,
+    search_moves: Vec<(u8, u8)>,
+) -> ((u8, u8), f64, SearchStats) {
     let st = make_state(squares, bag, first_color, ply, no_progress);
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
         return ((255, 255), 0.0, SearchStats::default());
     }
+    restrict_root_moves(&mut mv, &search_moves);
     order(&st, &mut mv);
     let vals = to_values(&values);
     let cfg = Cfg { contempt, root: st.mover_color(), quiesce: quiesce_on, quiesce_max: 8, w_mob, w_king, values: vals, feat: Feat::from_bits(features) };
     let mut ctx = Ctx::new(node_budget, time_ms, max_depth, if features & 2 != 0 { 18 } else { 0 });
+    ctx.root_moves = search_moves;
     // Seed the path with the root key AND the GAME's repetition window (zkeys of every
     // position seen since the last irreversible move, supplied by the caller). The
     // in-search path alone only catches a cycle once it fully closes inside the tree —
@@ -1456,13 +1502,39 @@ pub fn best_move_with_moves_scored_stats(
     time_ms: u64,
     features: u32,
 ) -> ((u8, u8), f64, SearchStats) {
+    best_move_with_moves_scored_stats_restricted(
+        squares, bag, first_color, no_progress, window_moves, node_budget, contempt, quiesce_on,
+        max_depth, w_mob, w_king, values, time_ms, features, Vec::new(),
+    )
+}
+
+/// `best_move_with_moves_scored_stats` with a UCI `searchmoves` root filter (see
+/// `best_move_scored_stats_restricted`). The UCI binary calls this for every `go`.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_with_moves_scored_stats_restricted(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    no_progress: u32,
+    window_moves: Vec<(u8, u8)>,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    search_moves: Vec<(u8, u8)>,
+) -> ((u8, u8), f64, SearchStats) {
     let mut st = make_state(squares, bag, first_color, 0, no_progress);
     let mut rep_history: Vec<u64> = Vec::with_capacity(window_moves.len());
     for (frm, to) in window_moves {
         rep_history.push(zkey(&st));
         st.push(frm, to, -1); // quiet move (no flip/capture inside a repetition window)
     }
-    best_move_scored_stats(
+    best_move_scored_stats_restricted(
         st.sq.to_vec(),
         st.bag.to_vec(),
         st.first_color,
@@ -1478,6 +1550,7 @@ pub fn best_move_with_moves_scored_stats(
         time_ms,
         features,
         rep_history,
+        search_moves,
     )
 }
 
@@ -2301,5 +2374,100 @@ mod result_tests {
         assert!(!probe.is_empty()); // RED still has a legal flip...
         let mut mv = Vec::new();
         assert_eq!(st.result(&mut mv), RES_BLACK); // ...yet RED is provably eliminated
+    }
+}
+
+#[cfg(test)]
+mod searchmoves_tests {
+    use super::*;
+
+    const VALUES: [f64; 7] = [30.0, 14.0, 11.0, 9.0, 7.0, 16.0, 4.0];
+    const FEATURES: u32 = 1018; // the UCI binary's feature set
+
+    fn search(p: &Parsed, filter: Vec<(u8, u8)>) -> (u8, u8) {
+        let ((f, t), _, _) = best_move_with_moves_scored_stats_restricted(
+            p.squares.clone(),
+            p.bag.clone(),
+            p.first_color,
+            p.no_progress,
+            vec![],
+            3000,
+            0.1,
+            true,
+            24,
+            0.8,
+            28.0,
+            VALUES.to_vec(),
+            0, // node budget only: deterministic
+            FEATURES,
+            filter,
+        );
+        (f, t)
+    }
+
+    fn positions() -> Vec<Parsed> {
+        let pool = "G1A2E2R2H2C2S5g1a2e2r2h2c2s5";
+        let opening = state_from_fen(&format!("XXXXXXXX/XXXXXXXX/XXXXXXXX/XXXXXXXX - {pool} 0 1")).unwrap();
+        // Mid-game: a few revealed pieces of each side among face-down tiles, red to move.
+        let mut sq = vec![DOWN; NSQ];
+        sq[0] = 0; // red general
+        sq[1] = EMPTY;
+        sq[9] = 12; // black cannon
+        sq[10] = EMPTY;
+        sq[18] = 5; // red cannon
+        sq[20] = 13; // black soldier
+        sq[21] = EMPTY;
+        sq[27] = 8; // black advisor
+        let mut bag = vec![0u32; 14];
+        let downs = sq.iter().filter(|&&c| c == DOWN).count() as u32;
+        // Spread the face-down tiles over a plausible pool: soldiers first.
+        let mut left = downs;
+        for role in [6usize, 6 + 7, 4, 4 + 7, 3, 3 + 7, 2, 2 + 7, 1, 1 + 7, 7, 5] {
+            let n = left.min(2);
+            bag[role] += n;
+            left -= n;
+        }
+        bag[6] += left;
+        let fen = fen_from_state(&sq, &bag, 0, 0, 10);
+        let mid = state_from_fen(&fen).unwrap();
+        vec![opening, mid]
+    }
+
+    fn legal(p: &Parsed) -> Vec<(u8, u8)> {
+        legal_moves(p.squares.clone(), p.bag.clone(), p.first_color, 0, p.no_progress)
+    }
+
+    #[test]
+    fn restricted_search_never_returns_an_excluded_move() {
+        for p in positions() {
+            let all = legal(&p);
+            assert!(all.len() > 2);
+            let best = search(&p, vec![]);
+            assert!(all.contains(&best));
+            // Each single non-best legal move: the engine must play exactly it.
+            for &m in all.iter().filter(|&&m| m != best).take(6) {
+                assert_eq!(search(&p, vec![m]), m, "single searchmoves {}", move_to_uci(m));
+            }
+            // Everything but the unrestricted best: the result is never the excluded move.
+            let rest: Vec<(u8, u8)> = all.iter().copied().filter(|&m| m != best).collect();
+            let got = search(&p, rest.clone());
+            assert_ne!(got, best);
+            assert!(rest.contains(&got));
+        }
+    }
+
+    #[test]
+    fn filter_matching_nothing_legal_is_unrestricted() {
+        for p in positions() {
+            let all = legal(&p);
+            let best = search(&p, vec![]);
+            // Moves that are not legal here (a face-down tile can't slide; off-pattern jump).
+            let bogus: Vec<(u8, u8)> = (0..NSQ as u8)
+                .flat_map(|a| (0..NSQ as u8).map(move |b| (a, b)))
+                .filter(|m| !all.contains(m))
+                .take(5)
+                .collect();
+            assert_eq!(search(&p, bogus), best);
+        }
     }
 }

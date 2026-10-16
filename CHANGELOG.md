@@ -3,6 +3,12 @@
 All notable changes to MistyBanqi. Strength figures are relative gains measured via
 large-scale paired-deal bakeoffs (see the README).
 
+## [0.2.6]
+
+- **UCI `go searchmoves`**: the root search now picks only from the listed moves, which
+  Mistboard uses to keep the bot out of a perpetual chase. A list with no legal move in it
+  is ignored and the search runs unrestricted, so a stale list never yields `(none)`.
+
 ## [0.2.3]
 
 - **Provable-elimination adjudication**: a side is now ruled lost the moment it has no

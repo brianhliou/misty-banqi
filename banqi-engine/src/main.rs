@@ -1,4 +1,10 @@
-//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.5.
+//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.6.
+//!
+//! v0.2.6: honours UCI `go … searchmoves <m>…` (always the LAST go token; it takes every
+//! remaining token). The root picks only from the listed moves; the tree below is not
+//! filtered. The host sends it when the perpetual-chase limit forbids a move. Without
+//! searchmoves (or when none of the listed moves is legal) the search is unchanged, so a
+//! stale list never yields "(none)".
 //!
 //! v0.2.5: the `info` line now reports what the search CONSUMED — `depth nodes nps time` in
 //! front of the existing `score cp … pv …`. The host persists a per-move artifact recording
@@ -50,7 +56,8 @@
 //!                         since; we replay them to seed the search's repetition history so the
 //!                         engine avoids/seeks threefold (perpetual-chase) draws instead of
 //!                         shuffling into them blind. FEN-only (no moves) = prior behavior.
-//!   go [movetime <ms>] [nodes <n>]  -> search, emit
+//!   go [movetime <ms>] [nodes <n>] [searchmoves <m>...]  -> search (root limited to the
+//!                         listed moves, if any is legal), emit
 //!                         "info depth <d> nodes <n> nps <x> time <ms> score cp <n> pv <uci>"
 //!                         then "bestmove <uci>" (or "bestmove (none)")
 //!   quit              -> exit
@@ -65,7 +72,7 @@ mod engine;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.5";
+const ENGINE_NAME: &str = "MistyBanqi 0.2.6";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
@@ -97,13 +104,14 @@ fn search_best(
     window_moves: &[(u8, u8)],
     movetime_ms: u64,
     node_budget: u64,
+    search_moves: &[(u8, u8)],
 ) -> (String, i64, engine::SearchStats) {
     // `p` is the position at the window start (last irreversible move); `window_moves`
     // are the quiet plies since. best_move_with_moves_scored replays them to seed the
     // search's repetition history, so the engine sees threefold from real game history
     // rather than shuffling into it. No `moves` ⇒ empty window ⇒ identical to the prior
     // FEN-only search. The scored variant also returns the root value (~[-1, 1]).
-    let ((frm, to), score, stats) = engine::best_move_with_moves_scored_stats(
+    let ((frm, to), score, stats) = engine::best_move_with_moves_scored_stats_restricted(
         p.squares.clone(),
         p.bag.clone(),
         p.first_color,
@@ -118,6 +126,7 @@ fn search_best(
         DEFAULT_VALUES.to_vec(),
         movetime_ms,
         FEATURES,
+        search_moves.to_vec(),
     );
     if frm == 255 {
         ("(none)".to_string(), 0, stats)
@@ -171,6 +180,7 @@ fn main() {
             "go" => {
                 let mut movetime = DEFAULT_MOVETIME_MS;
                 let mut nodes: u64 = 100_000_000;
+                let mut search_moves: Vec<(u8, u8)> = Vec::new();
                 let mut t = line.split_whitespace().skip(1);
                 while let Some(k) = t.next() {
                     match k {
@@ -184,13 +194,17 @@ fn main() {
                                 nodes = v.parse().unwrap_or(nodes);
                             }
                         }
+                        // Per UCI, searchmoves runs to the end of the line.
+                        "searchmoves" => {
+                            search_moves.extend(t.by_ref().filter_map(engine::uci_to_move));
+                        }
                         _ => {}
                     }
                 }
                 match &current {
                     Some(p) => {
                         let started = Instant::now();
-                        let (uci, cp, stats) = search_best(p, &current_moves, movetime, nodes);
+                        let (uci, cp, stats) = search_best(p, &current_moves, movetime, nodes, &search_moves);
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         if uci == "(none)" {
                             println!("bestmove (none)");
