@@ -1,6 +1,6 @@
 [package]
 name = "banqi-wasm"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["Brian Liou"]
 description = "MistyBanqi — WebAssembly build of the Banqi engine core for the in-browser review/analysis panel (client-side MultiPV)."

@@ -3,6 +3,16 @@
 All notable changes to MistyBanqi. Strength figures are relative gains measured via
 large-scale paired-deal bakeoffs (see the README).
 
+## [0.2.7]
+
+- **UCI option `NoProgressLimit`** (spin, default 40): the plies without a capture or flip
+  after which the game is drawn. The search hard-coded 40, so under a host rule of 60 it
+  scored plies 40-60 as already drawn and stopped trying to make progress there. Send
+  `setoption name NoProgressLimit value <n>` after `uci`; without it the engine keeps 40.
+- **wasm (banqi-wasm 0.2.5)**: `analyze_with_limit(fen, nodes, multipv, limit)` and
+  `AnalysisSession.set_no_progress_limit(limit)` take the same limit for browser analysis.
+  `analyze` and a session left unset keep 40.
+
 ## [0.2.6]
 
 - **UCI `go searchmoves`**: the root search now picks only from the listed moves, which

@@ -48,6 +48,10 @@ const RANK: [i32; 7] = [7, 6, 5, 4, 3, 2, 1];
 const EVAL_SCALE: f64 = 60.0;
 const W_MOB: f64 = 0.8;
 const VMIN: f64 = -1.0;
+/// Default no-capture-no-flip draw limit in plies (the TCGA/Taiwanese 40). Every entry point
+/// uses it except the `*_restricted` searches, which take the limit as an argument: the host
+/// game's rule decides it (Mistboard: 60 for games created from 2026-10-17, 40 before).
+pub const DEFAULT_NO_PROGRESS_LIMIT: u32 = 40;
 const VMAX: f64 = 1.0;
 const INF: f64 = f64::INFINITY;
 const ORTHO: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
@@ -113,6 +117,8 @@ struct State {
     first_color: i16,
     ply: u32,
     no_progress: u32,
+    /// Plies without a capture or flip after which the game is drawn.
+    no_progress_limit: u32,
 }
 
 impl State {
@@ -545,11 +551,12 @@ impl State {
 
     /// Fills `mv` with legal moves when ongoing. Returns a RES_* code.
     fn result(&self, mv: &mut Vec<(u8, u8)>) -> i16 {
-        // TCGA/Taiwanese 40-ply no-capture-no-flip clock. NOTE: threefold
+        // No-capture-no-flip clock (TCGA/Taiwanese default 40; the host may set another
+        // limit through the `*_restricted` searches / UCI `NoProgressLimit`). NOTE: threefold
         // position-repetition (also a draw, see board.py) is NOT modeled here —
         // the Rust search is fed per-position with no repetition history. Known
         // parity gap; the reference Python board adjudicates self-play with full history.
-        if self.no_progress >= 40 {
+        if self.no_progress >= self.no_progress_limit {
             return RES_DRAW;
         }
         self.legal_moves(mv);
@@ -1242,7 +1249,7 @@ fn make_state(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_p
     for (i, &c) in bag.iter().enumerate().take(14) {
         b[i] = c;
     }
-    State { sq, bag: b, first_color, ply, no_progress }
+    State { sq, bag: b, first_color, ply, no_progress, no_progress_limit: DEFAULT_NO_PROGRESS_LIMIT }
 }
 
 /// Node-budgeted iterative deepening. Returns (from, to); a flip is from==to.
@@ -1334,7 +1341,7 @@ pub fn best_move_scored_stats(
 ) -> ((u8, u8), f64, SearchStats) {
     best_move_scored_stats_restricted(
         squares, bag, first_color, ply, no_progress, node_budget, contempt, quiesce_on, max_depth,
-        w_mob, w_king, values, time_ms, features, rep_history, Vec::new(),
+        w_mob, w_king, values, time_ms, features, rep_history, Vec::new(), DEFAULT_NO_PROGRESS_LIMIT,
     )
 }
 
@@ -1358,8 +1365,10 @@ pub fn best_move_scored_stats_restricted(
     features: u32,
     rep_history: Vec<u64>,
     search_moves: Vec<(u8, u8)>,
+    no_progress_limit: u32,
 ) -> ((u8, u8), f64, SearchStats) {
-    let st = make_state(squares, bag, first_color, ply, no_progress);
+    let mut st = make_state(squares, bag, first_color, ply, no_progress);
+    st.no_progress_limit = no_progress_limit;
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
@@ -1504,7 +1513,7 @@ pub fn best_move_with_moves_scored_stats(
 ) -> ((u8, u8), f64, SearchStats) {
     best_move_with_moves_scored_stats_restricted(
         squares, bag, first_color, no_progress, window_moves, node_budget, contempt, quiesce_on,
-        max_depth, w_mob, w_king, values, time_ms, features, Vec::new(),
+        max_depth, w_mob, w_king, values, time_ms, features, Vec::new(), DEFAULT_NO_PROGRESS_LIMIT,
     )
 }
 
@@ -1527,6 +1536,7 @@ pub fn best_move_with_moves_scored_stats_restricted(
     time_ms: u64,
     features: u32,
     search_moves: Vec<(u8, u8)>,
+    no_progress_limit: u32,
 ) -> ((u8, u8), f64, SearchStats) {
     let mut st = make_state(squares, bag, first_color, 0, no_progress);
     let mut rep_history: Vec<u64> = Vec::with_capacity(window_moves.len());
@@ -1551,6 +1561,7 @@ pub fn best_move_with_moves_scored_stats_restricted(
         features,
         rep_history,
         search_moves,
+        no_progress_limit,
     )
 }
 
@@ -1774,6 +1785,12 @@ impl RootAnalysisSession {
             .total_nodes
             .saturating_add(self.ctx.nodes.min(self.ctx.budget));
         self.results()
+    }
+
+    /// Set the no-capture-no-flip draw limit (default `DEFAULT_NO_PROGRESS_LIMIT`). Call it
+    /// before the first `advance`: completed depths are not recomputed.
+    pub fn set_no_progress_limit(&mut self, limit: u32) {
+        self.st.no_progress_limit = limit;
     }
 
     pub fn depth(&self) -> i32 {
@@ -2401,6 +2418,7 @@ mod searchmoves_tests {
             0, // node budget only: deterministic
             FEATURES,
             filter,
+            DEFAULT_NO_PROGRESS_LIMIT,
         );
         (f, t)
     }
@@ -2469,5 +2487,92 @@ mod searchmoves_tests {
                 .collect();
             assert_eq!(search(&p, bogus), best);
         }
+    }
+}
+
+#[cfg(test)]
+mod no_progress_limit_tests {
+    use super::*;
+
+    const VALUES: [f64; 7] = [30.0, 14.0, 11.0, 9.0, 7.0, 16.0, 4.0];
+    const FEATURES: u32 = 1018; // the UCI binary's feature set
+    const CONTEMPT: f64 = 0.1;
+
+    /// Red general a1 + chariots b1, a2 against a lone black soldier on h4, all face-up, red
+    /// to move. Nothing is in contact, so every red move is quiet and advances the clock.
+    fn lopsided() -> (Vec<i16>, Vec<u32>) {
+        let mut sq = vec![EMPTY; NSQ];
+        sq[0] = 0; // a1 red general
+        sq[1] = 3; // b1 red chariot
+        sq[8] = 3; // a2 red chariot
+        sq[31] = 7 + 6; // h4 black soldier
+        (sq, vec![0u32; 14])
+    }
+
+    fn score(clock: u32, limit: u32) -> f64 {
+        let (sq, bag) = lopsided();
+        let (_, v, _) = best_move_scored_stats_restricted(
+            sq, bag, 0, 0, clock, 20_000, CONTEMPT, true, 24, 0.8, 28.0, VALUES.to_vec(), 0,
+            FEATURES, vec![], vec![], limit,
+        );
+        v
+    }
+
+    #[test]
+    fn clock_45_is_a_draw_under_limit_40() {
+        // Every reply is quiet, so each child sits at clock 46 >= 40: the root is worth
+        // exactly the mover's draw value, whatever the material says.
+        assert_eq!(score(45, 40), -CONTEMPT);
+    }
+
+    #[test]
+    fn clock_45_is_not_a_draw_under_limit_60() {
+        // Fifteen plies remain before the clock runs out, so the material edge counts.
+        let v = score(45, 60);
+        assert!(v > 0.2, "red up a general and two chariots should score well above a draw: {v}");
+    }
+
+    #[test]
+    fn the_limit_defaults_to_40() {
+        assert_eq!(DEFAULT_NO_PROGRESS_LIMIT, 40);
+        let (sq, bag) = lopsided();
+        assert_eq!(make_state(sq.clone(), bag.clone(), 0, 0, 0).no_progress_limit, 40);
+        // The unrestricted entry points keep the default: clock 45 is drawn there too.
+        let (_, v, _) = best_move_scored_stats(
+            sq, bag, 0, 0, 45, 20_000, CONTEMPT, true, 24, 0.8, 28.0, VALUES.to_vec(), 0,
+            FEATURES, vec![],
+        );
+        assert_eq!(v, -CONTEMPT);
+    }
+
+    #[test]
+    fn result_is_drawn_exactly_at_the_limit() {
+        let (sq, bag) = lopsided();
+        let mut mv = Vec::new();
+        let mut st = make_state(sq, bag, 0, 0, 59);
+        st.no_progress_limit = 60;
+        assert_eq!(st.result(&mut mv), RES_ONGOING);
+        st.no_progress = 60;
+        assert_eq!(st.result(&mut mv), RES_DRAW);
+    }
+
+    #[test]
+    fn analysis_session_takes_the_limit() {
+        let (sq, bag) = lopsided();
+        let session = |limit: Option<u32>| {
+            let mut s = RootAnalysisSession::new(
+                sq.clone(), bag.clone(), 0, 0, 45, CONTEMPT, true, 24, 0.8, 28.0,
+                VALUES.to_vec(), 0, FEATURES,
+            );
+            if let Some(l) = limit {
+                s.set_no_progress_limit(l);
+            }
+            s.advance(20_000)
+        };
+        // Default 40: every root move is a draw from the mover's side.
+        assert!(session(None).iter().all(|&(_, _, v, _)| v == -CONTEMPT));
+        // 60: the best move is worth more than a draw.
+        let best = session(Some(60)).first().map(|&(_, _, v, _)| v).unwrap();
+        assert!(best > 0.2, "{best}");
     }
 }

@@ -57,6 +57,13 @@ fn analysis_json(ranked: &[(u8, u8, f64, i32)], multipv: u32, nodes: u64) -> Str
 /// no legal move (terminal). `cp` is side-to-move POV (the browser normalizes to Red).
 #[wasm_bindgen]
 pub fn analyze(fen: &str, nodes: u32, multipv: u32) -> String {
+    analyze_with_limit(fen, nodes, multipv, engine::DEFAULT_NO_PROGRESS_LIMIT)
+}
+
+/// `analyze` under the game's no-capture-no-flip draw limit in plies (`analyze` uses 40).
+/// Mistboard games created from 2026-10-17 draw at 60, older ones at 40.
+#[wasm_bindgen]
+pub fn analyze_with_limit(fen: &str, nodes: u32, multipv: u32, no_progress_limit: u32) -> String {
     let parsed = match engine::state_from_fen(fen) {
         Some(p) => p,
         None => return "{\"error\":\"bad_fen\"}".to_string(),
@@ -76,6 +83,7 @@ pub fn analyze(fen: &str, nodes: u32, multipv: u32) -> String {
         0, // time_ms = 0: node-budget only (no wall clock on wasm)
         FEATURES,
     );
+    session.set_no_progress_limit(no_progress_limit.max(1));
     let ranked = session.advance(nodes as u64);
     analysis_json(&ranked, multipv, nodes as u64)
 }
@@ -114,6 +122,12 @@ impl AnalysisSession {
             ),
             multipv: multipv.max(1),
         })
+    }
+
+    /// Set the game's no-capture-no-flip draw limit in plies (default 40). Call it before
+    /// the first `step`.
+    pub fn set_no_progress_limit(&mut self, limit: u32) {
+        self.inner.set_no_progress_limit(limit.max(1));
     }
 
     pub fn step(&mut self, nodes: u32) -> String {

@@ -1,4 +1,11 @@
-//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.6.
+//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.7.
+//!
+//! v0.2.7: UCI option `NoProgressLimit` (spin, default 40): the plies without a capture or
+//! flip after which the game is drawn. The search used to hard-code 40, so under a host rule
+//! of 60 it scored plies 40-60 as already drawn and played aimlessly there. Send
+//! `setoption name NoProgressLimit value <n>` after `uci`; a host that never sends it gets
+//! the old 40. An older engine ignores the unknown command, so host and engine can deploy
+//! in either order.
 //!
 //! v0.2.6: honours UCI `go … searchmoves <m>…` (always the LAST go token; it takes every
 //! remaining token). The root picks only from the listed moves; the tree below is not
@@ -48,6 +55,7 @@
 //!
 //! Protocol (subset of UCI):
 //!   uci               -> id name/author, uciok
+//!   setoption name NoProgressLimit value <n> -> no-progress draw limit in plies (default 40)
 //!   isready           -> readyok
 //!   ucinewgame        -> clear position
 //!   position fen <FEN> [moves ...] -> store the (redacted) Banqi FEN. If a trailing
@@ -72,7 +80,7 @@ mod engine;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.6";
+const ENGINE_NAME: &str = "MistyBanqi 0.2.7";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
@@ -99,12 +107,51 @@ fn search_info_line(stats: &engine::SearchStats, elapsed_ms: u64, cp: i64, pv: &
     line
 }
 
+/// Engine options settable with `setoption`. They persist across `ucinewgame`, per UCI.
+#[derive(Debug, Clone, PartialEq)]
+struct Options {
+    no_progress_limit: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { no_progress_limit: engine::DEFAULT_NO_PROGRESS_LIMIT }
+    }
+}
+
+impl Options {
+    /// Apply one `setoption name <id> value <x>` line. Option names match case-insensitively
+    /// (UCI convention); an unknown name or an unparsable value leaves the options unchanged.
+    fn apply_setoption(&mut self, line: &str) {
+        let rest = match line.trim().strip_prefix("setoption") {
+            Some(r) => r.trim(),
+            None => return,
+        };
+        let rest = match rest.strip_prefix("name") {
+            Some(r) => r.trim(),
+            None => return,
+        };
+        let (name, value) = match rest.split_once(" value ") {
+            Some((n, v)) => (n.trim(), v.trim()),
+            None => return,
+        };
+        if name.eq_ignore_ascii_case("NoProgressLimit") {
+            if let Ok(n) = value.parse::<u32>() {
+                if n >= 1 {
+                    self.no_progress_limit = n;
+                }
+            }
+        }
+    }
+}
+
 fn search_best(
     p: &engine::Parsed,
     window_moves: &[(u8, u8)],
     movetime_ms: u64,
     node_budget: u64,
     search_moves: &[(u8, u8)],
+    options: &Options,
 ) -> (String, i64, engine::SearchStats) {
     // `p` is the position at the window start (last irreversible move); `window_moves`
     // are the quiet plies since. best_move_with_moves_scored replays them to seed the
@@ -127,6 +174,7 @@ fn search_best(
         movetime_ms,
         FEATURES,
         search_moves.to_vec(),
+        options.no_progress_limit,
     );
     if frm == 255 {
         ("(none)".to_string(), 0, stats)
@@ -142,6 +190,7 @@ fn main() {
     let stdin = io::stdin();
     let mut current: Option<engine::Parsed> = None;
     let mut current_moves: Vec<(u8, u8)> = Vec::new();
+    let mut options = Options::default();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -153,8 +202,13 @@ fn main() {
             "uci" => {
                 println!("id name {ENGINE_NAME}");
                 println!("id author Mistboard");
+                println!(
+                    "option name NoProgressLimit type spin default {} min 1 max 1000",
+                    engine::DEFAULT_NO_PROGRESS_LIMIT
+                );
                 println!("uciok");
             }
+            "setoption" => options.apply_setoption(line),
             "isready" => println!("readyok"),
             "ucinewgame" => {
                 current = None;
@@ -204,7 +258,7 @@ fn main() {
                 match &current {
                     Some(p) => {
                         let started = Instant::now();
-                        let (uci, cp, stats) = search_best(p, &current_moves, movetime, nodes, &search_moves);
+                        let (uci, cp, stats) = search_best(p, &current_moves, movetime, nodes, &search_moves, &options);
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         if uci == "(none)" {
                             println!("bestmove (none)");
@@ -230,7 +284,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::engine;
-    use super::{search_info_line, DEFAULT_VALUES, FEATURES};
+    use super::{search_best, search_info_line, Options, DEFAULT_VALUES, FEATURES};
 
     // Piece code = color*7 + role (red=0, black=1; roles 0..6 = gen,adv,ele,cha,hor,can,sol).
     // Square index = file + rank*8 (file a..h = 0..7, rank 1..4 = 0..3). Empty = -1, face-down = -2.
@@ -364,5 +418,46 @@ mod tests {
         let m = (idx(3, 1) as u8, idx(4, 1) as u8);
         let uci = engine::move_to_uci(m);
         assert_eq!(engine::uci_to_move(&uci), Some(m), "uci codec must round-trip ({uci})");
+    }
+
+    #[test]
+    fn no_progress_limit_defaults_to_40() {
+        assert_eq!(Options::default().no_progress_limit, 40);
+    }
+
+    #[test]
+    fn setoption_sets_the_no_progress_limit() {
+        let mut o = Options::default();
+        o.apply_setoption("setoption name NoProgressLimit value 60");
+        assert_eq!(o.no_progress_limit, 60);
+        o.apply_setoption("setoption name noprogresslimit value 40");
+        assert_eq!(o.no_progress_limit, 40, "option names match case-insensitively");
+        // Unknown names, garbage and zero leave it alone.
+        o.apply_setoption("setoption name Hash value 64");
+        o.apply_setoption("setoption name NoProgressLimit value sixty");
+        o.apply_setoption("setoption name NoProgressLimit value 0");
+        o.apply_setoption("setoption name NoProgressLimit");
+        assert_eq!(o.no_progress_limit, 40);
+    }
+
+    #[test]
+    fn the_go_search_uses_the_option() {
+        // Red general a1 + chariots b1, a2 against a lone black soldier h4 at clock 45: every
+        // red move is quiet, so under 40 the root is the mover's draw value (-contempt) and
+        // under 60 the material edge counts.
+        let mut sq = vec![-1i16; 32];
+        sq[idx(0, 0)] = 0;
+        sq[idx(1, 0)] = 3;
+        sq[idx(0, 1)] = 3;
+        sq[idx(7, 3)] = 7 + 6;
+        let fen = engine::fen_from_state(&sq, &[0u32; 14], 0, 45, 30);
+        let p = engine::state_from_fen(&fen).expect("fen");
+        assert_eq!(p.no_progress, 45);
+        let mut o = Options::default();
+        let (_, cp40, _) = search_best(&p, &[], 0, 20_000, &[], &o);
+        assert_eq!(cp40, -100, "drawn under the default 40");
+        o.apply_setoption("setoption name NoProgressLimit value 60");
+        let (_, cp60, _) = search_best(&p, &[], 0, 20_000, &[], &o);
+        assert!(cp60 > 200, "not drawn under 60: {cp60}");
     }
 }
