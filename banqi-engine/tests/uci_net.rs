@@ -6,6 +6,14 @@ use std::time::Instant;
 const SPARSE: &str = "8/8/8/G6r r - 0 1";
 const OPENING: &str = "XXXXXXXX/XXXXXXXX/XXXXXXXX/XXXXXXXX - G1A2E2R2H2C2S5g1a2e2r2h2c2s5 0 1";
 
+// Two flips that score exactly the same (cp -21 at depth 1), where macOS/aarch64
+// and Linux/x86-64 break the tie differently. Every release from 0.2.7 on does
+// this, so the fixture (recorded on macOS) also accepts the Linux move.
+const PLATFORM_TIES: &[(&str, &str)] = &[(
+    "SXXXXXRX/cXXXXHXX/XXXXXXXX/XXAXXXXX b G1A1E2R1H1C2S4g1a2e2r2h2c1s5 0 1",
+    "bestmove h2h2",
+)];
+
 fn fixture(text: &str, net: Option<&std::path::Path>) {
     let mut uci = Uci::new();
     if let Some(path) = net {
@@ -35,10 +43,13 @@ fn fixture(text: &str, net: Option<&std::path::Path>) {
             go.push_str(&format!(" searchmoves {moves}"));
         }
         let reply = uci.go(position, &go);
-        assert_eq!(
-            reply.last().unwrap(),
-            expected,
-            "position {count}: {position}"
+        let got = reply.last().unwrap();
+        let tie = PLATFORM_TIES
+            .iter()
+            .any(|(fen, alt)| fen == position && got == alt);
+        assert!(
+            got == expected || tie,
+            "position {count}: {position}: got {got}, expected {expected}"
         );
         count += 1;
     }
