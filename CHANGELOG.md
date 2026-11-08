@@ -3,6 +3,17 @@
 All notable changes to MistyBanqi. Strength figures are relative gains measured via
 large-scale paired-deal bakeoffs (see the README).
 
+## [0.2.8]
+
+- **Weaker play**: UCI `Noise` (string, default 0) adds Gaussian noise to root
+  move scores, including flips. `NoiseDepth` (spin, default 1, range 1-8) sets
+  the scoring depth; `Seed` (string, default 0, u64) enables reproducible choices
+  when nonzero. Settings persist across `ucinewgame`; Noise 0 keeps the normal search.
+- **Bounded noisy search**: deepen to the requested depth under the node and time
+  limits, choosing from the deepest completed pass. Depth 1 always completes.
+  Guards preserve immediate wins and avoid immediate losses when a safe move exists,
+  checking all flip reveals, and protect terminal scores found by completed passes.
+
 ## [0.2.7]
 
 - **UCI option `NoProgressLimit`** (spin, default 40): the plies without a capture or flip

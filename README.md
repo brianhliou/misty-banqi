@@ -85,7 +85,7 @@ The UCI binary (no Python needed):
 
 ```sh
 cargo build --release -p banqi-engine
-echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.2 ...
+echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.8 ...
 ```
 
 Drive it over UCI with a Banqi FEN (face-down tile = `X`; turn `r`/`b`/`-`; then the bag and clock):
@@ -113,6 +113,22 @@ wasm-pack build banqi-wasm --target web --release
 It exposes one-shot `analyze` plus a stateful `AnalysisSession`. Repeated bounded
 `step(nodes)` calls preserve iterative-deepening state, the transposition table, and
 move-ordering history while giving the browser a cancellation boundary between slices.
+
+## Weaker play
+
+Set these UCI options before `ucinewgame`. Settings persist across games.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `Noise` | `0` | Finite, nonnegative Gaussian standard deviation in native [-1, 1] score units. Fractional values are accepted. Zero keeps the normal search. |
+| `NoiseDepth` | `1` | Integer from 1 to 8. Maximum depth for scoring each root move before adding noise, including flips. |
+| `Seed` | `0` | Unsigned 64-bit integer. Nonzero values replay choices for the same position, settings and completed depth. Zero uses fresh entropy. |
+
+Noisy search deepens one ply at a time and uses the deepest completed pass under
+`go nodes` and `movetime`. Depth 1 always completes, even with a smaller budget.
+It takes immediate wins, checks every possible flip reveal to avoid immediate
+losses when a safe move exists, and preserves terminal win/loss scores found by
+completed passes. Draws keep the normal contempt score.
 
 ## Layout
 

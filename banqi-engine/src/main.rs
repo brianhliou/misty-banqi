@@ -56,6 +56,9 @@
 //! Protocol (subset of UCI):
 //!   uci               -> id name/author, uciok
 //!   setoption name NoProgressLimit value <n> -> no-progress draw limit in plies (default 40)
+//!   setoption name Noise value <sigma> -> Gaussian root noise (default 0)
+//!   setoption name NoiseDepth value <n> -> noisy scoring depth (1..8, default 1)
+//!   setoption name Seed value <u64> -> reproducible noise; 0 uses entropy
 //!   isready           -> readyok
 //!   ucinewgame        -> clear position
 //!   position fen <FEN> [moves ...] -> store the (redacted) Banqi FEN. If a trailing
@@ -80,7 +83,7 @@ mod engine;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.7";
+const ENGINE_NAME: &str = "MistyBanqi 0.2.8";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
@@ -111,11 +114,20 @@ fn search_info_line(stats: &engine::SearchStats, elapsed_ms: u64, cp: i64, pv: &
 #[derive(Debug, Clone, PartialEq)]
 struct Options {
     no_progress_limit: u32,
+    play: engine::PlayOptions,
+    seed: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { no_progress_limit: engine::DEFAULT_NO_PROGRESS_LIMIT }
+        Self {
+            no_progress_limit: engine::DEFAULT_NO_PROGRESS_LIMIT,
+            play: engine::PlayOptions {
+                noise: 0.0,
+                noise_depth: 1,
+            },
+            seed: 0,
+        }
     }
 }
 
@@ -141,8 +153,36 @@ impl Options {
                     self.no_progress_limit = n;
                 }
             }
+        } else if name.eq_ignore_ascii_case("Noise") {
+            if let Ok(noise) = value.parse() {
+                let candidate = engine::PlayOptions { noise, ..self.play };
+                if candidate.validate().is_ok() {
+                    self.play = candidate;
+                }
+            }
+        } else if name.eq_ignore_ascii_case("NoiseDepth") {
+            if let Ok(noise_depth) = value.parse::<i32>() {
+                let candidate = engine::PlayOptions {
+                    noise_depth,
+                    ..self.play
+                };
+                if noise_depth >= 1 && candidate.validate().is_ok() {
+                    self.play = candidate;
+                }
+            }
+        } else if name.eq_ignore_ascii_case("Seed") {
+            if let Ok(seed) = value.parse() {
+                self.seed = seed;
+            }
         }
     }
+}
+
+fn entropy_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
 }
 
 fn search_best(
@@ -158,7 +198,7 @@ fn search_best(
     // search's repetition history, so the engine sees threefold from real game history
     // rather than shuffling into it. No `moves` ⇒ empty window ⇒ identical to the prior
     // FEN-only search. The scored variant also returns the root value (~[-1, 1]).
-    let ((frm, to), score, stats) = engine::best_move_with_moves_scored_stats_restricted(
+    let ((frm, to), score, stats) = engine::select_move_with_moves_scored_stats_restricted(
         p.squares.clone(),
         p.bag.clone(),
         p.first_color,
@@ -175,6 +215,8 @@ fn search_best(
         FEATURES,
         search_moves.to_vec(),
         options.no_progress_limit,
+        &options.play,
+        if options.play.noise > 0.0 && options.seed == 0 { entropy_seed() } else { options.seed },
     );
     if frm == 255 {
         ("(none)".to_string(), 0, stats)
@@ -206,6 +248,9 @@ fn main() {
                     "option name NoProgressLimit type spin default {} min 1 max 1000",
                     engine::DEFAULT_NO_PROGRESS_LIMIT
                 );
+                println!("option name Noise type string default 0");
+                println!("option name NoiseDepth type spin default 1 min 1 max 8");
+                println!("option name Seed type string default 0");
                 println!("uciok");
             }
             "setoption" => options.apply_setoption(line),
@@ -423,6 +468,38 @@ mod tests {
     #[test]
     fn no_progress_limit_defaults_to_40() {
         assert_eq!(Options::default().no_progress_limit, 40);
+    }
+
+    #[test]
+    fn play_options_accept_ranges_and_preserve_settings_on_invalid_input() {
+        let mut options = Options::default();
+        assert_eq!(options.play.noise, 0.0);
+        assert_eq!(options.play.noise_depth, 1);
+        assert_eq!(options.seed, 0);
+        for (name, good, bad) in [
+            ("Noise", "0.15", vec!["-1", "NaN", "inf", "text", "1 2"]),
+            ("NoiseDepth", "8", vec!["0", "9", "-1", "1.5"]),
+            ("Seed", "18446744073709551615", vec!["-1", "18446744073709551616", "1.5"]),
+        ] {
+            options.apply_setoption(&format!("setoption name {name} value {good}"));
+            let previous = options.clone();
+            for value in bad {
+                options.apply_setoption(&format!("setoption name {name} value {value}"));
+                assert_eq!(options, previous);
+            }
+        }
+        assert_eq!(options.play.noise, 0.15);
+        assert_eq!(options.play.noise_depth, 8);
+        assert_eq!(options.seed, u64::MAX);
+        let previous = options.clone();
+        for line in ["setoption", "setoption name Noise", "setoption name Mix value 1"] {
+            options.apply_setoption(line);
+            assert_eq!(options, previous);
+        }
+        options.apply_setoption("setoption name noise value 0");
+        options.apply_setoption("setoption name noisedepth value 1");
+        options.apply_setoption("setoption name seed value 0");
+        assert_eq!(options, Options::default());
     }
 
     #[test]
