@@ -4,20 +4,21 @@ version = 4
 
 [[package]]
 name = "banqi-engine"
-version = "0.2.8"
+version = "0.3.0"
 
 [[package]]
 name = "banqi-wasm"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "banqi_rust"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pyo3",
+ "pyo3-build-config",
 ]
 
 [[package]]

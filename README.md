@@ -6,7 +6,7 @@
 
 A [Banqi](https://en.wikipedia.org/wiki/Banqi) (Chinese Dark Chess) engine in Rust: αβ search
 with **Star1 chance-node expectiminimax** for the hidden-tile flips, a transposition table,
-repetition handling, quiescence, and a handcrafted evaluation. Ships as a tiny UCI binary, with
+repetition handling, quiescence, and classical or optional NNUE evaluation. Ships as a UCI binary, with
 the same search core exposed to Python via PyO3.
 
 Banqi is a hidden-information game: pieces start face-down and flip to reveal during play, so a
@@ -18,22 +18,12 @@ pieces. That mix of decision and chance nodes is the heart of the engine.
     <img src="assets/game.webp" alt="A full MistyBanqi self-play game, tiles flipping and pieces trading until Red has nothing left on the board" width="560">
   </a>
   <br>
-  <sub><i>MistyBanqi against itself at full strength (1.5M nodes a move): 100 plies, 21 captures, and Black takes the last red piece off the board.</i></sub>
+  <sub><i>A MistyBanqi self-play game.</i></sub>
 </p>
 
 **Play it** against the computer on [mistboard.com](https://mistboard.com/?play=computer&gameSpecId=banqi),
 where this engine is the Banqi opponent ([rules](https://mistboard.com/rules/banqi)). Full build
 report: [Building a Banqi Engine](https://brianhliou.com/posts/building-banqi-engine/).
-
-## Strength
-
-A competent αβ CDC engine, tuned by large-scale paired-deal bakeoffs (every relative gain below is
-measured that way). It makes no SOTA claim: it has not played CLAP_CDC, DarkKnight, or other top
-programs, so there is no head-to-head result. The part worth reading is how the strength was built.
-
-MistyBanqi is the banqi bot on [mistboard.com](https://mistboard.com/rules/banqi), at 3.5M nodes a
-move. An engine that beats it at the same node budget over 200 games takes its seat, with your name
-on it; the terms are at [brianhliou.com/challenges](https://brianhliou.com/challenges/).
 
 ## How it works
 
@@ -45,39 +35,12 @@ Decision nodes are ordinary αβ negamax.
 
 **Machinery.** A Zobrist transposition table keyed on (board, bag, side-to-move); repetition
 detection with contempt (avoid draws when ahead, seek them when losing) plus a root anti-draw-sac
-guard; quiescence over captures; iterative deepening under a node budget, so strength is
-CPU-independent (`go nodes N`).
+guard; quiescence over captures; iterative deepening under a node budget (`go nodes N`).
 
-**Evaluation, handcrafted and measured.** Material on a corrected value table, covered-piece
+**Classical evaluation.** Material on a corrected value table, covered-piece
 ("full-alive") material so a flip never creates phantom value, value-aware mobility,
 context-dependent general value, an adaptive *domination* term (a piece is worth more as the
 enemies that could capture it dwindle), and a general-safety term.
-
-## Two tuning stories
-
-The engine is competent CDC; how it was tuned is the interesting part.
-
-**Cheap-strength climb (+16.6% win-rate).** Stack handcrafted eval terms, each behind a feature
-bit and validated by cloud-scale paired-deal bakeoffs (local 40-game matches are too noisy at
-Banqi's ~56% draw rate to see a few-percent edge). The biggest single win was a bug in the value
-table: the cannon (the most tactically dominant piece, via screen capture) was undervalued and the
-chariot overvalued; fixing the order alone was ~+10%.
-
-**General-safety, and measuring the right thing.** The engine let its general get cornered and
-captured. The fix was "make luft": flip a face-down neighbor to give a boxed general a 2×2 escape
-before the hunting soldier arrives. Two lessons came out of it. Don't adjudicate a defensive idea
-with the engine's own evaluation: if the eval is blind to the danger, asking it "is this move
-good?" is circular, so the save was verified by exact analysis and a played-out line. And a
-defensive term is invisible to an opponent that can't exploit the weakness: against a baseline that
-doesn't hunt generals, win-rate barely moved, so a direct metric ("did we lose our own general?")
-was needed to see the real drop (35.5% → 26%).
-
-## Roadmap
-
-Handcrafted αβ has a ceiling: the cheap-eval climb has plateaued, and general-safety bought
-robustness over raw strength. The next bet is a learned value network (AlphaZero-style), parked on
-compute and engineering. A local self-play de-risk has not yet climbed past the αβ clone, so the
-cloud spend is not justified on local evidence alone.
 
 ## Build & run
 
@@ -85,7 +48,7 @@ The UCI binary (no Python needed):
 
 ```sh
 cargo build --release -p banqi-engine
-echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.2.8 ...
+echo "uci" | ./target/release/banqi-engine        # → id name MistyBanqi 0.3.0 ...
 ```
 
 Drive it over UCI with a Banqi FEN (face-down tile = `X`; turn `r`/`b`/`-`; then the bag and clock):
@@ -130,19 +93,72 @@ It takes immediate wins, checks every possible flip reveal to avoid immediate
 losses when a safe move exists, and preserves terminal win/loss scores found by
 completed passes. Draws keep the normal contempt score.
 
+## NNUE evaluation
+
+No trained net ships with the engine. `EvalFile` defaults to empty, using
+classical evaluation. To load a separately supplied BQNN v2 file:
+
+```text
+uci
+setoption name EvalFile value /path/to/evaluation.bqnn
+isready
+position fen XXXXXXXX/XXXXXXXX/XXXXXXXX/XXXXXXXX - G1A2E2R2H2C2S5g1a2e2r2h2c2s5 0 1
+go nodes 5000 movetime 0
+```
+
+Paths may contain spaces and need no quotes. An empty value or `<empty>` restores
+classical evaluation. A failed load reports
+`info string error EvalFile: ...; using classical` and clears any previous net.
+Options persist across `ucinewgame`.
+
+The reader accepts **BQNN v2**: a `BQNN` magic header, five little-endian 32-bit
+integers (version 2, 576 features, hidden width 1–4096, 16, 32), then little-endian
+float32 weights in the order documented in
+[`nnue.rs`](banqi-engine/src/nnue.rs). UCI loading also checks that weights fit the
+integer accumulator. The payload order is `FT[576,H]`, `FT bias[H]`,
+`W1[16,2H]`, `b1[16]`, `W2[32,16]`, `b2[32]`, `W3[1,32]`, `b3[1]`.
+FT rows are feature-major and dense rows are output-major. Total file length is
+`24 + 4 * (609 * H + 593)` bytes, with no padding or trailing bytes. All weights
+must be finite with absolute value at most 1,000,000.
+
+Features describe public piece locations relative to each seat's colour, covered
+tiles, bag-count thresholds, the no-progress clock, repetition and turn flags.
+NNUE uses integer incremental accumulators and quantized dense layers; terminal
+results remain exact rule outcomes.
+
+Net mode uses zero contempt, four capture-quiescence plies, and a depth ceiling of
+64. It carries exact threefold/chase state through the tree and disables the
+position-only transposition table and approximate cycle draws. Classical mode
+keeps its existing settings. `NoProgressLimit` remains 40 by default in both modes;
+`go searchmoves`, node/time limits, FEN and move notation retain the public protocol.
+`Noise`, `NoiseDepth` and `Seed` work with either evaluator.
+See the [validation record](docs/0.3.0-validation.md) for the complete settings and fixtures.
+
+For validation without a trained net, run `cargo test --workspace`. The loader,
+inference, features, rules and UCI tests use synthetic weights built in the tests.
+Two trained-net checks print a skip message unless `MISTY_BANQI_EVALFILE` is set:
+
+```sh
+MISTY_BANQI_EVALFILE=/path/to/evaluation.bqnn cargo test --workspace
+```
+
+The fixed-node NNUE fixture requires the net used by its reference engine.
+Keep evaluation files outside this repository; a repository scan checks for both
+`.bqnn` files and files beginning with the `BQNN` magic bytes.
+
 ## Layout
 
 ```
 banqi_rust/      engine core (engine.rs) + PyO3 Python bindings (lib.rs)
-banqi-engine/    standalone UCI binary (main.rs; #[path]-includes the core)
+banqi-engine/    standalone UCI binary, NNUE inference and protocol fixtures
 banqi-wasm/      wasm-bindgen browser API, including incremental analysis sessions
 .github/workflows/  ci (build + uci smoke) and release (tag → published binary)
 ```
 
 ## Acknowledgements
 
-The handcrafted evaluation started from [george0828Zhang/chinese-dark-chess-hw](https://github.com/george0828Zhang/chinese-dark-chess-hw),
-which was also the fixed reference opponent the bakeoffs were tuned against. The context-dependent
+The handcrafted evaluation started from [george0828Zhang/chinese-dark-chess-hw](https://github.com/george0828Zhang/chinese-dark-chess-hw).
+The context-dependent
 general value and the value-weighted mobility, in particular, are adapted from it.
 
 ## License

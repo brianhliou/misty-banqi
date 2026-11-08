@@ -119,6 +119,7 @@ struct State {
     no_progress: u32,
     /// Plies without a capture or flip after which the game is drawn.
     no_progress_limit: u32,
+    rules: Option<std::sync::Arc<dyn SearchRules>>,
 }
 
 impl State {
@@ -200,6 +201,9 @@ impl State {
             if is_piece(c) && code_color(c) == mc {
                 self.piece_moves(i, c, mc, out);
             }
+        }
+        if let Some(rules) = &self.rules {
+            rules.filter_moves(out);
         }
     }
 
@@ -529,6 +533,9 @@ impl State {
     }
 
     fn push(&mut self, frm: u8, to: u8, revealed: i16) {
+        if let Some(rules) = &self.rules {
+            self.rules = Some(rules.advance((frm, to), revealed));
+        }
         if frm == to {
             self.sq[frm as usize] = revealed;
             self.bag[revealed as usize] -= 1;
@@ -557,6 +564,9 @@ impl State {
         // the Rust search is fed per-position with no repetition history. Known
         // parity gap; the reference Python board adjudicates self-play with full history.
         if self.no_progress >= self.no_progress_limit {
+            return RES_DRAW;
+        }
+        if self.rules.as_ref().is_some_and(|r| r.repetition_draw()) {
             return RES_DRAW;
         }
         self.legal_moves(mv);
@@ -753,7 +763,32 @@ impl Feat {
     }
 }
 
-struct Cfg {
+/// Public leaf view: contains only the public position. The callback returns a
+/// side-to-move utility in [-1,1]; terminal and repetition adjudication stay in search.
+#[allow(dead_code)]
+pub struct EvalPosition<'a> {
+    pub squares: &'a [i16; 32],
+    pub bag: &'a [u32; 14],
+    pub first_color: i16,
+    pub ply: u32,
+    pub no_progress: u32,
+    pub repeat_count: u32,
+}
+/// Optional public rule state carried through every child, including chance
+/// outcomes and quiescence. Legacy callers install none.
+#[allow(dead_code)]
+pub trait SearchRules {
+    fn advance(&self, mv: (u8, u8), revealed: i16) -> std::sync::Arc<dyn SearchRules>;
+    fn filter_moves(&self, moves: &mut Vec<(u8, u8)>);
+    fn repetition_draw(&self) -> bool;
+    fn repeat_count(&self) -> u32;
+}
+pub trait Evaluator {
+    fn evaluate(&self, position: EvalPosition<'_>) -> f64;
+}
+
+struct Cfg<'a> {
+    evaluator: Option<&'a dyn Evaluator>,
     contempt: f64,
     root: i16,
     quiesce: bool,
@@ -828,7 +863,7 @@ impl Ctx {
     }
 }
 
-fn terminal_value(st: &State, res: i16, cfg: &Cfg) -> f64 {
+fn terminal_value(st: &State, res: i16, cfg: &Cfg<'_>) -> f64 {
     if res == RES_DRAW {
         if cfg.contempt != 0.0 && cfg.root >= 0 {
             return if st.mover_color() == cfg.root {
@@ -893,7 +928,7 @@ fn order_key_rich(st: &State, m: (u8, u8), depth: i32, ctx: &Ctx) -> i32 {
 
 /// Order moves in place. Falls back to the plain MVV order when ordering is off, so
 /// the features=0 path is byte-identical to the pre-push engine.
-fn order_moves(st: &State, mv: &mut [(u8, u8)], depth: i32, cfg: &Cfg, ctx: &Ctx) {
+fn order_moves(st: &State, mv: &mut [(u8, u8)], depth: i32, cfg: &Cfg<'_>, ctx: &Ctx) {
     if cfg.feat.ordering {
         mv.sort_by(|a, b| order_key_rich(st, *b, depth, ctx).cmp(&order_key_rich(st, *a, depth, ctx)));
     } else {
@@ -901,14 +936,30 @@ fn order_moves(st: &State, mv: &mut [(u8, u8)], depth: i32, cfg: &Cfg, ctx: &Ctx
     }
 }
 
-fn quiesce(st: &State, mut alpha: f64, beta: f64, cfg: &Cfg, ctx: &mut Ctx, qdepth: i32) -> Result<f64, ()> {
+fn leaf_eval(st: &State, cfg: &Cfg<'_>, ctx: &Ctx) -> f64 {
+    match cfg.evaluator {
+        None => st.eval(st.mover_color(), cfg.w_mob, cfg.w_king, &cfg.values, &cfg.feat),
+        Some(eval) => {
+            let key = zkey(st);
+            eval.evaluate(EvalPosition {
+                squares: &st.sq, bag: &st.bag, first_color: st.first_color,
+                ply: st.ply, no_progress: st.no_progress,
+                repeat_count: st.rules.as_ref().map_or_else(
+                    || 1 + ctx.path.iter().filter(|&&k| k == key).count() as u32,
+                    |r| r.repeat_count()),
+            })
+        }
+    }
+}
+
+fn quiesce(st: &State, mut alpha: f64, beta: f64, cfg: &Cfg<'_>, ctx: &mut Ctx, qdepth: i32) -> Result<f64, ()> {
     ctx.tick()?;
     let mut mv: Vec<(u8, u8)> = Vec::new();
     let res = st.result(&mut mv);
     if res != RES_ONGOING {
         return Ok(terminal_value(st, res, cfg));
     }
-    let stand = st.eval(st.mover_color(), cfg.w_mob, cfg.w_king, &cfg.values, &cfg.feat);
+    let stand = leaf_eval(st, cfg, ctx);
     if stand >= beta || qdepth <= 0 {
         return Ok(stand);
     }
@@ -945,7 +996,7 @@ fn quiesce(st: &State, mut alpha: f64, beta: f64, cfg: &Cfg, ctx: &mut Ctx, qdep
     Ok(best)
 }
 
-fn flip_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &Cfg, ctx: &mut Ctx) -> Result<f64, ()> {
+fn flip_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &Cfg<'_>, ctx: &mut Ctx) -> Result<f64, ()> {
     let total: u32 = st.bag.iter().sum();
     let (l, u) = (VMIN, VMAX);
     let mut vsum = 0.0;
@@ -984,7 +1035,7 @@ fn flip_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &
     Ok(vsum)
 }
 
-fn move_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &Cfg, ctx: &mut Ctx) -> Result<f64, ()> {
+fn move_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &Cfg<'_>, ctx: &mut Ctx) -> Result<f64, ()> {
     if m.0 == m.1 {
         return flip_value(st, m, depth, alpha, beta, cfg, ctx);
     }
@@ -993,7 +1044,7 @@ fn move_value(st: &State, m: (u8, u8), depth: i32, alpha: f64, beta: f64, cfg: &
     Ok(-negamax(&child, depth - 1, -beta, -alpha, cfg, ctx)?)
 }
 
-fn negamax(st: &State, depth: i32, mut alpha: f64, beta: f64, cfg: &Cfg, ctx: &mut Ctx) -> Result<f64, ()> {
+fn negamax(st: &State, depth: i32, mut alpha: f64, beta: f64, cfg: &Cfg<'_>, ctx: &mut Ctx) -> Result<f64, ()> {
     ctx.tick()?;
     let mut mv: Vec<(u8, u8)> = Vec::new();
     let res = st.result(&mut mv);
@@ -1004,7 +1055,7 @@ fn negamax(st: &State, depth: i32, mut alpha: f64, beta: f64, cfg: &Cfg, ctx: &m
         if cfg.quiesce {
             return quiesce(st, alpha, beta, cfg, ctx, cfg.quiesce_max);
         }
-        return Ok(st.eval(st.mover_color(), cfg.w_mob, cfg.w_king, &cfg.values, &cfg.feat));
+        return Ok(leaf_eval(st, cfg, ctx));
     }
     let alpha_orig = alpha;
     let key = if cfg.feat.tt || cfg.feat.rep { zkey(st) } else { 0 };
@@ -1159,7 +1210,7 @@ fn restrict_root_moves(mv: &mut Vec<(u8, u8)>, filter: &[(u8, u8)]) {
 
 // Root-only: the per-move children go through `move_value` -> `negamax`, never back here,
 // so `ctx.root_moves` filters the root and nothing below it.
-fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
+fn best_at_depth(st: &State, depth: i32, cfg: &Cfg<'_>, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     restrict_root_moves(&mut mv, &ctx.root_moves);
@@ -1203,7 +1254,7 @@ fn best_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<
 /// Like `best_at_depth` but returns the chosen move AND its root negamax value
 /// (side-to-move perspective). Used by `search_value` for value distillation —
 /// the label is "what the engine truly thinks", not the static leaf eval.
-fn root_value_at_depth(st: &State, depth: i32, cfg: &Cfg, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
+fn root_value_at_depth(st: &State, depth: i32, cfg: &Cfg<'_>, ctx: &mut Ctx, hint: Option<(u8, u8)>) -> Result<Option<((u8, u8), f64)>, ()> {
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
@@ -1249,7 +1300,7 @@ fn make_state(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_p
     for (i, &c) in bag.iter().enumerate().take(14) {
         b[i] = c;
     }
-    State { sq, bag: b, first_color, ply, no_progress, no_progress_limit: DEFAULT_NO_PROGRESS_LIMIT }
+    State { sq, bag: b, first_color, ply, no_progress, no_progress_limit: DEFAULT_NO_PROGRESS_LIMIT, rules: None }
 }
 
 /// Node-budgeted iterative deepening. Returns (from, to); a flip is from==to.
@@ -1551,6 +1602,7 @@ pub fn select_move_with_moves_scored_stats_restricted(
         st.push(frm, to, EMPTY);
     }
     let cfg = Cfg {
+        evaluator: None,
         contempt,
         root: st.mover_color(),
         quiesce: quiesce_on,
@@ -1560,6 +1612,22 @@ pub fn select_move_with_moves_scored_stats_restricted(
         values: to_values(&values),
         feat: Feat::from_bits(features),
     };
+    select_noisy_move(st, cfg, &rep_history, search_moves, play, node_budget, time_ms, start, seed)
+}
+
+/// Shared weak-play guards and scoring for classical and optional evaluators.
+#[allow(clippy::too_many_arguments)]
+fn select_noisy_move(
+    st: State,
+    cfg: Cfg<'_>,
+    rep_history: &[u64],
+    search_moves: Vec<(u8, u8)>,
+    play: &PlayOptions,
+    node_budget: u64,
+    time_ms: u64,
+    start: Instant,
+    seed: u64,
+) -> ((u8, u8), f64, SearchStats) {
     let mut legal = Vec::new();
     let result = st.result(&mut legal);
     if result != RES_ONGOING {
@@ -1587,7 +1655,7 @@ pub fn select_move_with_moves_scored_stats_restricted(
         node_budget,
         time_ms,
         start,
-        &rep_history,
+        rep_history,
         &mut PlayRng::new(seed ^ zkey(&st)),
     )
 }
@@ -1669,8 +1737,89 @@ pub fn best_move_scored_stats_restricted(
     search_moves: Vec<(u8, u8)>,
     no_progress_limit: u32,
 ) -> ((u8, u8), f64, SearchStats) {
+    best_move_scored_stats_with_eval(
+        squares, bag, first_color, ply, no_progress, node_budget, contempt,
+        quiesce_on, max_depth, w_mob, w_king, values, time_ms, features,
+        rep_history, search_moves, no_progress_limit, 8, None, None,
+    )
+}
+
+/// Select with optional evaluation/rules and the same weak-play policy as classical.
+#[allow(clippy::too_many_arguments)]
+pub fn select_move_scored_stats_with_eval(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    ply: u32,
+    no_progress: u32,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    rep_history: Vec<u64>,
+    search_moves: Vec<(u8, u8)>,
+    no_progress_limit: u32,
+    quiesce_max: i32,
+    evaluator: Option<&dyn Evaluator>,
+    rules: Option<std::sync::Arc<dyn SearchRules>>,
+    play: &PlayOptions,
+    seed: u64,
+) -> ((u8, u8), f64, SearchStats) {
+    play.validate().expect("invalid PlayOptions");
+    if play.noise == 0.0 {
+        return best_move_scored_stats_with_eval(
+            squares, bag, first_color, ply, no_progress, node_budget, contempt,
+            quiesce_on, max_depth, w_mob, w_king, values, time_ms, features,
+            rep_history, search_moves, no_progress_limit, quiesce_max, evaluator, rules,
+        );
+    }
+    let start = Instant::now();
     let mut st = make_state(squares, bag, first_color, ply, no_progress);
     st.no_progress_limit = no_progress_limit;
+    let features = if rules.is_some() { features & !(2 | 8) } else { features };
+    st.rules = rules;
+    let cfg = Cfg {
+        evaluator, contempt, root: st.mover_color(), quiesce: quiesce_on,
+        quiesce_max, w_mob, w_king, values: to_values(&values),
+        feat: Feat::from_bits(features),
+    };
+    select_noisy_move(st, cfg, &rep_history, search_moves, play, node_budget, time_ms, start, seed)
+}
+
+/// Optional leaf evaluator and history-dependent rules. Classical callers use
+/// the wrapper above; rules disable position-only TT and approximate cycle draws.
+#[allow(clippy::too_many_arguments)]
+pub fn best_move_scored_stats_with_eval(
+    squares: Vec<i16>,
+    bag: Vec<u32>,
+    first_color: i16,
+    ply: u32,
+    no_progress: u32,
+    node_budget: u64,
+    contempt: f64,
+    quiesce_on: bool,
+    max_depth: i32,
+    w_mob: f64,
+    w_king: f64,
+    values: Vec<f64>,
+    time_ms: u64,
+    features: u32,
+    rep_history: Vec<u64>,
+    search_moves: Vec<(u8, u8)>,
+    no_progress_limit: u32,
+    quiesce_max: i32,
+    evaluator: Option<&dyn Evaluator>,
+    rules: Option<std::sync::Arc<dyn SearchRules>>,
+) -> ((u8, u8), f64, SearchStats) {
+    let mut st = make_state(squares, bag, first_color, ply, no_progress);
+    st.no_progress_limit = no_progress_limit;
+    let features = if rules.is_some() { features & !(2 | 8) } else { features };
+    st.rules = rules;
     let mut mv: Vec<(u8, u8)> = Vec::new();
     st.legal_moves(&mut mv);
     if mv.is_empty() {
@@ -1679,7 +1828,7 @@ pub fn best_move_scored_stats_restricted(
     restrict_root_moves(&mut mv, &search_moves);
     order(&st, &mut mv);
     let vals = to_values(&values);
-    let cfg = Cfg { contempt, root: st.mover_color(), quiesce: quiesce_on, quiesce_max: 8, w_mob, w_king, values: vals, feat: Feat::from_bits(features) };
+    let cfg = Cfg { evaluator, contempt, root: st.mover_color(), quiesce: quiesce_on, quiesce_max, w_mob, w_king, values: vals, feat: Feat::from_bits(features) };
     let mut ctx = Ctx::new(node_budget, time_ms, max_depth, if features & 2 != 0 { 18 } else { 0 });
     ctx.root_moves = search_moves;
     // Seed the path with the root key AND the GAME's repetition window (zkeys of every
@@ -1887,7 +2036,7 @@ pub fn search_value(
 ) -> f64 {
     let st = make_state(squares, bag, first_color, ply, no_progress);
     let vals = to_values(&values);
-    let cfg = Cfg { contempt: 0.0, root: st.mover_color(), quiesce: quiesce_on, quiesce_max: 8, w_mob, w_king, values: vals, feat: Feat::none() };
+    let cfg = Cfg { evaluator: None, contempt: 0.0, root: st.mover_color(), quiesce: quiesce_on, quiesce_max: 8, w_mob, w_king, values: vals, feat: Feat::none() };
     // Terminal at the root: return the exact terminal value (no search needed).
     let mut mv: Vec<(u8, u8)> = Vec::new();
     let res = st.result(&mut mv);
@@ -1964,7 +2113,7 @@ pub fn root_move_values(
 /// a budget abort from leaving stale ancestors behind.
 pub struct RootAnalysisSession {
     st: State,
-    cfg: Cfg,
+    cfg: Cfg<'static>,
     max_depth: i32,
     ctx: Ctx,
     moves: Vec<(u8, u8)>,
@@ -1992,7 +2141,7 @@ impl RootAnalysisSession {
         features: u32,
     ) -> Self {
         let st = make_state(squares, bag, first_color, ply, no_progress);
-        let cfg = Cfg {
+        let cfg = Cfg { evaluator: None,
             contempt,
             root: st.mover_color(),
             quiesce: quiesce_on,
@@ -2115,7 +2264,7 @@ impl RootAnalysisSession {
 /// against Python's unpruned `_expectimax` oracle (a value that's order-independent).
 pub fn negamax_value(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_progress: u32, depth: i32) -> f64 {
     let st = make_state(squares, bag, first_color, ply, no_progress);
-    let cfg = Cfg { contempt: 0.0, root: -1, quiesce: false, quiesce_max: 8, w_mob: W_MOB, w_king: 0.0, values: VALUE, feat: Feat::none() };
+    let cfg = Cfg { evaluator: None, contempt: 0.0, root: -1, quiesce: false, quiesce_max: 8, w_mob: W_MOB, w_king: 0.0, values: VALUE, feat: Feat::none() };
     let mut ctx = Ctx::new(u64::MAX, 0, depth, 0);
     negamax(&st, depth, -2.0, 2.0, &cfg, &mut ctx).unwrap_or(0.0)
 }
@@ -2180,7 +2329,7 @@ struct MNode {
 
 struct Tree {
     nodes: Vec<MNode>,
-    cfg: Cfg,
+    cfg: Cfg<'static>,
     c_uct: f64,
     leaf_depth: i32, // 0 = static eval leaf; >0 = short alpha-beta (with quiescence) leaf
 }
@@ -2317,7 +2466,7 @@ pub fn mcts_move(
     values: Vec<f64>,
 ) -> (u8, u8) {
     let st = make_state(squares, bag, first_color, ply, no_progress);
-    let cfg = Cfg {
+    let cfg = Cfg { evaluator: None,
         contempt: 0.0,
         root: st.mover_color(),
         quiesce: leaf_depth > 0, // tactical leaf uses quiescence; static leaf doesn't

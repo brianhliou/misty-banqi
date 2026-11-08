@@ -1,6 +1,6 @@
 [package]
 name = "banqi-engine"
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
 authors = ["Brian Liou"]
 description = "MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine."

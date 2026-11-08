@@ -11,10 +11,13 @@
 //!   color: 0 red, 1 black; first_color: -1 unbound, 0 red, 1 black
 //!   bag: [u32; 14] indexed by the piece code (count of unrevealed of that type)
 
+// Rust unit tests exercise the core without linking Python extension exports.
+#[cfg(not(test))]
 use pyo3::prelude::*;
 
 mod engine;
 
+#[cfg(not(test))]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (squares, bag, first_color, ply, no_progress, node_budget, contempt,
@@ -44,11 +47,13 @@ fn best_move(
 
 /// Zobrist key for a position (board + bag + side-to-move) — used to compute the
 /// repetition window passed to `best_move(..., rep_history=...)`.
+#[cfg(not(test))]
 #[pyfunction]
 fn zkey(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32) -> u64 {
     engine::zkey_for(squares, bag, first_color, ply)
 }
 
+#[cfg(not(test))]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn search_value(
@@ -70,6 +75,7 @@ fn search_value(
     )
 }
 
+#[cfg(not(test))]
 #[pyfunction]
 fn negamax_value(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_progress: u32, depth: i32) -> f64 {
     engine::negamax_value(squares, bag, first_color, ply, no_progress, depth)
@@ -77,6 +83,7 @@ fn negamax_value(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, n
 
 /// DIAGNOSTIC: per-root-move exact values under the full shipped Cfg+features. Returns a
 /// list of (from, to, value, depth_reached). Not on any shipped path — introspection only.
+#[cfg(not(test))]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn root_move_values(
@@ -101,11 +108,13 @@ fn root_move_values(
     )
 }
 
+#[cfg(not(test))]
 #[pyfunction]
 fn legal_moves(squares: Vec<i16>, bag: Vec<u32>, first_color: i16, ply: u32, no_progress: u32) -> Vec<(u8, u8)> {
     engine::legal_moves(squares, bag, first_color, ply, no_progress)
 }
 
+#[cfg(not(test))]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn mcts_move(
@@ -129,6 +138,7 @@ fn mcts_move(
     )
 }
 
+#[cfg(not(test))]
 #[pymodule]
 fn banqi_rust(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(best_move, m)?)?;

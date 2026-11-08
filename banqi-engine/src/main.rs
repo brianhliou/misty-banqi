@@ -1,4 +1,4 @@
-//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.2.7.
+//! MistyBanqi — standalone Banqi (Chinese Dark Chess) UCI engine, v0.3.0.
 //!
 //! v0.2.7: UCI option `NoProgressLimit` (spin, default 40): the plies without a capture or
 //! flip after which the game is drawn. The search used to hard-code 40, so under a host rule
@@ -59,6 +59,7 @@
 //!   setoption name Noise value <sigma> -> Gaussian root noise (default 0)
 //!   setoption name NoiseDepth value <n> -> noisy scoring depth (1..8, default 1)
 //!   setoption name Seed value <u64> -> reproducible noise; 0 uses entropy
+//!   setoption name EvalFile value <path> -> load NNUE; empty restores classical
 //!   isready           -> readyok
 //!   ucinewgame        -> clear position
 //!   position fen <FEN> [moves ...] -> store the (redacted) Banqi FEN. If a trailing
@@ -76,14 +77,13 @@
 //! The FEN/move contract is defined in `engine.rs` (see its FEN+UCI section). The engine
 //! never sees a face-down piece's identity.
 
-#[path = "../../banqi_rust/src/engine.rs"]
-#[allow(dead_code)] // engine.rs also exposes the PyO3-facing entry points, unused here
-mod engine;
+use banqi_engine::{engine, net_search, nnue::Net};
+use std::sync::Arc;
 
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-const ENGINE_NAME: &str = "MistyBanqi 0.2.8";
+const ENGINE_NAME: &str = "MistyBanqi 0.3.0";
 const DEFAULT_MOVETIME_MS: u64 = 1000;
 // Search/eval features (banqi_rust Feat bitmask): TT(2) + repetition(8) + cover_mat(16) +
 // king_ctx(32) + value-aware mobility(64) + adaptive domination value(128) + gen_danger(256)
@@ -104,18 +104,36 @@ fn search_info_line(stats: &engine::SearchStats, elapsed_ms: u64, cp: i64, pv: &
     }
     line.push_str(&format!(" nodes {}", stats.nodes));
     if elapsed_ms > 0 {
-        line.push_str(&format!(" nps {}", stats.nodes.saturating_mul(1000) / elapsed_ms));
+        line.push_str(&format!(
+            " nps {}",
+            stats.nodes.saturating_mul(1000) / elapsed_ms
+        ));
     }
     line.push_str(&format!(" time {elapsed_ms} score cp {cp} pv {pv}"));
     line
 }
 
 /// Engine options settable with `setoption`. They persist across `ucinewgame`, per UCI.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Options {
     no_progress_limit: u32,
     play: engine::PlayOptions,
     seed: u64,
+    net: Option<Arc<Net>>,
+}
+
+#[cfg(test)]
+impl PartialEq for Options {
+    fn eq(&self, other: &Self) -> bool {
+        self.no_progress_limit == other.no_progress_limit
+            && self.play == other.play
+            && self.seed == other.seed
+            && match (&self.net, &other.net) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
 }
 
 impl Default for Options {
@@ -127,6 +145,7 @@ impl Default for Options {
                 noise_depth: 1,
             },
             seed: 0,
+            net: None,
         }
     }
 }
@@ -145,9 +164,26 @@ impl Options {
         };
         let (name, value) = match rest.split_once(" value ") {
             Some((n, v)) => (n.trim(), v.trim()),
-            None => return,
+            None => (rest.strip_suffix(" value").unwrap_or(rest).trim(), ""),
         };
-        if name.eq_ignore_ascii_case("NoProgressLimit") {
+        if name.eq_ignore_ascii_case("EvalFile") {
+            self.net = None;
+            if !value.is_empty() && value != "<empty>" {
+                match Net::load(value).and_then(|net| {
+                    if net.can_quantize() {
+                        Ok(net)
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "weights do not fit the integer accumulator",
+                        ))
+                    }
+                }) {
+                    Ok(net) => self.net = Some(Arc::new(net)),
+                    Err(error) => println!("info string error EvalFile: {error}; using classical"),
+                }
+            }
+        } else if name.eq_ignore_ascii_case("NoProgressLimit") {
             if let Ok(n) = value.parse::<u32>() {
                 if n >= 1 {
                     self.no_progress_limit = n;
@@ -198,26 +234,45 @@ fn search_best(
     // search's repetition history, so the engine sees threefold from real game history
     // rather than shuffling into it. No `moves` ⇒ empty window ⇒ identical to the prior
     // FEN-only search. The scored variant also returns the root value (~[-1, 1]).
-    let ((frm, to), score, stats) = engine::select_move_with_moves_scored_stats_restricted(
-        p.squares.clone(),
-        p.bag.clone(),
-        p.first_color,
-        p.no_progress,
-        window_moves.to_vec(),
-        node_budget,
-        0.1,  // contempt: seek decisive play
-        true, // quiescence
-        24,   // max depth
-        0.8,  // w_mob
-        28.0, // w_king — weight of the gen_danger general-safety term (v0.2.1; bit 256 in FEATURES)
-        DEFAULT_VALUES.to_vec(),
-        movetime_ms,
-        FEATURES,
-        search_moves.to_vec(),
-        options.no_progress_limit,
-        &options.play,
-        if options.play.noise > 0.0 && options.seed == 0 { entropy_seed() } else { options.seed },
-    );
+    let seed = if options.play.noise > 0.0 && options.seed == 0 {
+        entropy_seed()
+    } else {
+        options.seed
+    };
+    let ((frm, to), score, stats) = if let Some(net) = &options.net {
+        net_search::search(
+            net,
+            p,
+            window_moves,
+            node_budget,
+            movetime_ms,
+            search_moves,
+            options.no_progress_limit,
+            &options.play,
+            seed,
+        )
+    } else {
+        engine::select_move_with_moves_scored_stats_restricted(
+            p.squares.clone(),
+            p.bag.clone(),
+            p.first_color,
+            p.no_progress,
+            window_moves.to_vec(),
+            node_budget,
+            0.1,  // contempt: seek decisive play
+            true, // quiescence
+            24,   // max depth
+            0.8,  // w_mob
+            28.0, // w_king — weight of the gen_danger general-safety term (v0.2.1; bit 256 in FEATURES)
+            DEFAULT_VALUES.to_vec(),
+            movetime_ms,
+            FEATURES,
+            search_moves.to_vec(),
+            options.no_progress_limit,
+            &options.play,
+            seed,
+        )
+    };
     if frm == 255 {
         ("(none)".to_string(), 0, stats)
     } else {
@@ -251,6 +306,7 @@ fn main() {
                 println!("option name Noise type string default 0");
                 println!("option name NoiseDepth type spin default 1 min 1 max 8");
                 println!("option name Seed type string default 0");
+                println!("option name EvalFile type string default <empty>");
                 println!("uciok");
             }
             "setoption" => options.apply_setoption(line),
@@ -271,7 +327,11 @@ fn main() {
                         current = engine::state_from_fen(fenstr);
                         current_moves = parts
                             .next()
-                            .map(|s| s.split_whitespace().filter_map(engine::uci_to_move).collect())
+                            .map(|s| {
+                                s.split_whitespace()
+                                    .filter_map(engine::uci_to_move)
+                                    .collect()
+                            })
                             .unwrap_or_default();
                     }
                 }
@@ -303,7 +363,14 @@ fn main() {
                 match &current {
                     Some(p) => {
                         let started = Instant::now();
-                        let (uci, cp, stats) = search_best(p, &current_moves, movetime, nodes, &search_moves, &options);
+                        let (uci, cp, stats) = search_best(
+                            p,
+                            &current_moves,
+                            movetime,
+                            nodes,
+                            &search_moves,
+                            &options,
+                        );
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         if uci == "(none)" {
                             println!("bestmove (none)");

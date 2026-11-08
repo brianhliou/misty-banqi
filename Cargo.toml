@@ -9,3 +9,7 @@ resolver = "2"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Preserve Mach-O LINKEDIT alignment in the Python extension on older Rust toolchains.
+[profile.release.package.banqi_rust]
+strip = "none"

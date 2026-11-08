@@ -25,8 +25,9 @@ fn masked() -> State {
     st
 }
 
-fn cfg(st: &State) -> Cfg {
+fn cfg(st: &State) -> Cfg<'_> {
     Cfg {
+        evaluator: None,
         contempt: 0.1,
         root: st.mover_color(),
         quiesce: true,
